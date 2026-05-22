@@ -1,0 +1,29 @@
+class Devenv < Formula
+  desc "CLI development environment manager"
+  homepage "https://github.com/{{GITHUB_OWNER}}/{{GITHUB_REPO}}"
+  version "{{VERSION}}"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/{{GITHUB_OWNER}}/{{GITHUB_REPO}}/releases/download/v{{VERSION}}/devenv-{{VERSION}}-aarch64-apple-darwin.tar.gz"
+      sha256 "{{SHA256_MACOS_ARM64}}"
+    end
+
+    on_intel do
+      url "https://github.com/{{GITHUB_OWNER}}/{{GITHUB_REPO}}/releases/download/v{{VERSION}}/devenv-{{VERSION}}-x86_64-apple-darwin.tar.gz"
+      sha256 "{{SHA256_MACOS_X64}}"
+    end
+  end
+
+  def install
+    bin.install "devenv"
+  end
+
+  test do
+    ENV["DEVENV_HOME"] = testpath/"devenv-home"
+    assert_match "devenv #{version}", shell_output("#{bin}/devenv --version")
+    system bin/"devenv", "shim", "rehash"
+    assert_match "status: ok", shell_output("#{bin}/devenv doctor")
+  end
+end

@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/devenv-adapters",
+    "crates/devenv-cli",
+    "crates/devenv-core",
+    "crates/devenv-tools",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT"
+publish = false
+

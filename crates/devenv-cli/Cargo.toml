@@ -1,0 +1,22 @@
+[package]
+name = "devenv-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "devenv"
+path = "src/main.rs"
+
+[dependencies]
+devenv-adapters = { path = "../devenv-adapters" }
+devenv-core = { path = "../devenv-core" }
+devenv-tools = { path = "../devenv-tools" }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+serde_json = "1"
+tempfile = "3"
