@@ -299,10 +299,17 @@ npm publish target/npm/@sponzey/devenv --access public
 
 GitHub Actions publish:
 
-- configure an npm automation token as repository secret `NPM_TOKEN`;
+- configure npm Trusted Publishing for package `@sponzey/devenv`;
+- publisher: GitHub Actions;
+- organization or user: `Sponzey-com`;
+- repository: `DevEnv`;
+- workflow filename: `release.yml`;
+- allowed action: `npm publish`;
 - push the release tag;
 - the release workflow creates GitHub release assets first, then publishes `@sponzey/devenv`;
-- if `NPM_TOKEN` is absent, npm publish is skipped without failing the release.
+- the workflow uses GitHub OIDC through `id-token: write` and does not require a long-lived `NPM_TOKEN`.
+
+If token-based publishing is used instead of Trusted Publishing, the token must be a granular access token with write access to the package or scope and Bypass 2FA enabled. A regular token will fail with `E403` when npm requires two-factor authentication for package publishing.
 
 User install/update:
 

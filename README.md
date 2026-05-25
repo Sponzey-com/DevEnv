@@ -6,7 +6,7 @@ DevEnv is a Rust-based CLI for selecting, installing, and activating development
 
 The project takes inspiration from tools such as `jenv`, `goenv`, `pyenv`, `asdf`, and `mise`, while aiming for a broader, extensible provider model across many languages and tools. DevEnv is CLI-first and does not require a server, GUI, daemon, database, or cloud dependency.
 
-The current product version is `0.1.5`. The single source of truth is the root `Cargo.toml`:
+The current product version is `0.1.6`. The single source of truth is the root `Cargo.toml`:
 
 ```text
 Cargo.toml -> [workspace.package] -> version
@@ -250,6 +250,8 @@ Publish after the matching GitHub release artifacts are available:
 scripts/package-npm.sh
 npm publish target/npm/@sponzey/devenv --access public
 ```
+
+The release workflow publishes through npm Trusted Publishing, not a long-lived `NPM_TOKEN`. Configure npm with GitHub Actions as a trusted publisher for package `@sponzey/devenv`, repository `Sponzey-com/DevEnv`, workflow filename `release.yml`, and allowed action `npm publish`.
 
 The package installs a small Node.js shim and downloads the matching prebuilt GitHub release artifact during `postinstall`. It verifies the `.tar.gz.sha256` checksum before installing the local `devenv` binary.
 
