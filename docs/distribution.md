@@ -7,8 +7,8 @@ DevEnv distribution starts with GitHub release artifacts and an organization Hom
 Create a tag:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v<version>
+git push origin v<version>
 ```
 
 The release workflow builds:
@@ -53,7 +53,7 @@ DEVENV_RELEASE_SMOKE=0 scripts/package-release.sh
 The version output includes target, build profile, and git sha:
 
 ```text
-devenv 0.1.0 (target=aarch64-apple-darwin, profile=release, git=<sha>)
+devenv <version> (target=aarch64-apple-darwin, profile=release, git=<sha>)
 ```
 
 Build timestamps are intentionally omitted so artifacts stay reproducible enough for early users.
@@ -167,10 +167,10 @@ The product version is owned by `workspace.package.version` in the root `Cargo.t
 Prepare a release version:
 
 ```sh
-scripts/release-version.sh 0.1.1
+scripts/release-version.sh <version>
 ```
 
-By default the script requires a clean worktree, updates `Cargo.toml`, refreshes `Cargo.lock` through `cargo test`, commits `Cargo.toml` and `Cargo.lock` as `Release 0.1.1`, and creates the annotated tag `v0.1.1`.
+By default the script requires a clean worktree, updates `Cargo.toml`, refreshes `Cargo.lock` through `cargo test`, commits `Cargo.toml` and `Cargo.lock` as `Release <version>`, and creates the annotated tag `v<version>`.
 
 The script does not push commits or tags. Push the release commit and tag explicitly after review:
 
@@ -181,9 +181,9 @@ git push origin HEAD --tags
 Useful variants:
 
 ```sh
-scripts/release-version.sh 0.1.1 --dry-run
-scripts/release-version.sh 0.1.1 --no-commit
-scripts/release-version.sh 0.1.1 --no-tag
+scripts/release-version.sh <version> --dry-run
+scripts/release-version.sh <version> --no-commit
+scripts/release-version.sh <version> --no-tag
 ```
 
 npm packaging must read the same Cargo workspace version when generating `@sponzey/devenv` and platform package `package.json` files. Do not hand-edit npm package versions separately.
@@ -218,7 +218,7 @@ Verify an artifact:
 
 ```sh
 cd target/dist
-shasum -a 256 -c devenv-0.1.0-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c devenv-<version>-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 ## Homebrew Tap
