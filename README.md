@@ -6,7 +6,7 @@ DevEnv is a Rust-based CLI for selecting, installing, and activating development
 
 The project takes inspiration from tools such as `jenv`, `goenv`, `pyenv`, `asdf`, and `mise`, while aiming for a broader, extensible provider model across many languages and tools. DevEnv is CLI-first and does not require a server, GUI, daemon, database, or cloud dependency.
 
-The current product version is `0.1.8`. The single source of truth is the root `Cargo.toml`:
+The current product version is `0.1.9`. The single source of truth is the root `Cargo.toml`:
 
 ```text
 Cargo.toml -> [workspace.package] -> version
@@ -252,6 +252,8 @@ npm publish target/npm/@sponzey/devenv --access public
 ```
 
 The release workflow publishes through npm Trusted Publishing, not a long-lived `NPM_TOKEN`. Configure npm with GitHub Actions as a trusted publisher for package `@sponzey/devenv`, repository `Sponzey-com/DevEnv`, workflow filename `release.yml`, and allowed action `npm publish`.
+
+The release workflow only attempts npm publish when repository variable `NPM_PUBLISH_ENABLED` is set to `true`. Leave it unset while bootstrapping the npm scope so GitHub Release artifacts can still be published.
 
 For the first publish, make sure the npm `sponzey` organization or user scope exists and that the publishing account has permission to create `@sponzey/devenv`. If npm returns `E404` during `PUT https://registry.npmjs.org/@sponzey%2fdevenv`, the package or scope is not accessible to the publisher. Bootstrap the package once with an authorized npm account using 2FA or a granular access token with Bypass 2FA, then enable Trusted Publishing for subsequent releases.
 

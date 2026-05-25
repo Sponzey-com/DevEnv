@@ -101,13 +101,22 @@ jobs:
         run: scripts/npm-smoke.sh
 
       - name: Set up Node.js for npm trusted publishing
+        if: vars.NPM_PUBLISH_ENABLED == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
+      - name: Skip npm package publish
+        if: vars.NPM_PUBLISH_ENABLED != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "NPM_PUBLISH_ENABLED is not true; skipping npm publish"
+
       - name: Publish npm package
+        if: vars.NPM_PUBLISH_ENABLED == 'true'
         shell: bash
         run: |
           set -euo pipefail

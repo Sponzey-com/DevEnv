@@ -308,6 +308,8 @@ If npm fails with `E404 Not Found - PUT https://registry.npmjs.org/@sponzey%2fde
 
 GitHub Actions publish:
 
+- set repository variable `NPM_PUBLISH_ENABLED` to `true` only after the npm scope/package can be published;
+- leave `NPM_PUBLISH_ENABLED` unset while bootstrapping npm so GitHub Release artifact publishing is not blocked by npm registry permissions;
 - configure npm Trusted Publishing for package `@sponzey/devenv`;
 - publisher: GitHub Actions;
 - organization or user: `Sponzey-com`;
