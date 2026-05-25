@@ -1,12 +1,23 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use devenv_core::{
     ActivationPlan, Architecture, ArchiveType, Artifact, ArtifactResolver, CoreError, CoreResult,
-    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform,
-    RegisteredRuntime, RuntimeRegistry, ToolAdapter, ToolMetadata, ToolName, Version,
-    VersionMatcher, VersionRequirement, VersionScheme, VersionSource,
+    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform, ProviderId,
+    RegisteredRuntime, RemoteRelease, RemoteReleaseIndex, ResolvedArtifact, RuntimeRegistry,
+    ToolAdapter, ToolMetadata, ToolName, Version, VersionMatcher, VersionRequirement,
+    VersionScheme, VersionSource,
 };
+use serde::Deserialize;
+
+pub const TERRAFORM_OFFICIAL_INDEX_URL: &str =
+    "https://releases.hashicorp.com/terraform/index.json";
+pub const TERRAFORM_OFFICIAL_BASE_URL: &str = "https://releases.hashicorp.com/terraform";
+pub const OPENTOFU_OFFICIAL_RELEASES_URL: &str =
+    "https://api.github.com/repos/opentofu/opentofu/releases";
+pub const OPENTOFU_OFFICIAL_BASE_URL: &str =
+    "https://github.com/opentofu/opentofu/releases/download";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IacTool {
@@ -37,6 +48,13 @@ impl IacTool {
         match self {
             Self::Terraform => "terraform",
             Self::OpenTofu => "tofu",
+        }
+    }
+
+    pub fn provider_id(self) -> &'static str {
+        match self {
+            Self::Terraform => "hashicorp",
+            Self::OpenTofu => "opentofu",
         }
     }
 }
@@ -366,6 +384,24 @@ impl IacReleaseMetadata {
         &self.releases
     }
 
+    pub fn from_release_index(tool: IacTool, index: &RemoteReleaseIndex) -> CoreResult<Self> {
+        if index.tool().as_str() != tool.as_str() {
+            return Err(CoreError::message(format!(
+                "{} release metadata cannot be built from `{}` index",
+                tool.display_name(),
+                index.tool()
+            )));
+        }
+
+        let releases = index
+            .releases()
+            .iter()
+            .map(iac_release_from_remote_release)
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self { releases })
+    }
+
     fn release_for_version(&self, tool: IacTool, version: &Version) -> CoreResult<&IacRelease> {
         if let Some(exact) = self
             .releases()
@@ -400,6 +436,172 @@ impl IacReleaseMetadata {
                     version
                 ))
             })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IacOfficialReleaseMetadata {
+    tool: IacTool,
+    index: RemoteReleaseIndex,
+}
+
+impl IacOfficialReleaseMetadata {
+    pub fn parse_terraform(
+        index_json: &str,
+        checksums_by_version: &BTreeMap<String, String>,
+    ) -> CoreResult<Self> {
+        let payload =
+            serde_json::from_str::<TerraformOfficialIndexPayload>(index_json).map_err(|error| {
+                CoreError::message(format!("failed to parse Terraform official index: {error}"))
+            })?;
+        let tool = IacTool::Terraform;
+        let tool_name = tool.tool_name();
+        let provider = ProviderId::new(tool.provider_id())
+            .expect("built-in Terraform provider id should be valid");
+        let releases = payload
+            .versions
+            .into_iter()
+            .map(|(version, release)| {
+                terraform_remote_release_from_official_payload(
+                    tool,
+                    &tool_name,
+                    &provider,
+                    &version,
+                    release,
+                    checksums_by_version,
+                )
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self {
+            tool,
+            index: RemoteReleaseIndex::new(tool_name, provider, releases),
+        })
+    }
+
+    pub fn parse_opentofu(
+        releases_json: &str,
+        checksums_by_version: &BTreeMap<String, String>,
+    ) -> CoreResult<Self> {
+        let payload = serde_json::from_str::<Vec<OpenTofuReleasePayload>>(releases_json).map_err(
+            |error| {
+                CoreError::message(format!(
+                    "failed to parse OpenTofu official releases: {error}"
+                ))
+            },
+        )?;
+        let tool = IacTool::OpenTofu;
+        let tool_name = tool.tool_name();
+        let provider = ProviderId::new(tool.provider_id())
+            .expect("built-in OpenTofu provider id should be valid");
+        let releases = payload
+            .into_iter()
+            .filter(|release| !release.draft)
+            .map(|release| {
+                opentofu_remote_release_from_official_payload(
+                    tool,
+                    &tool_name,
+                    &provider,
+                    release,
+                    checksums_by_version,
+                )
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self {
+            tool,
+            index: RemoteReleaseIndex::new(tool_name, provider, releases),
+        })
+    }
+
+    pub fn release_index(&self) -> &RemoteReleaseIndex {
+        &self.index
+    }
+
+    pub fn into_release_index(self) -> RemoteReleaseIndex {
+        self.index
+    }
+
+    pub fn into_release_metadata(self) -> CoreResult<IacReleaseMetadata> {
+        IacReleaseMetadata::from_release_index(self.tool, &self.index)
+    }
+
+    pub fn tool(&self) -> IacTool {
+        self.tool
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IacCatalogReleaseMetadata {
+    tool: IacTool,
+    index: RemoteReleaseIndex,
+}
+
+impl IacCatalogReleaseMetadata {
+    pub fn parse_terraform(input: &str) -> CoreResult<Self> {
+        Self::parse(input, IacTool::Terraform)
+    }
+
+    fn parse(input: &str, tool: IacTool) -> CoreResult<Self> {
+        let payload = serde_json::from_str::<IacCatalogPayload>(input).map_err(|error| {
+            CoreError::message(format!(
+                "failed to parse {} catalog metadata: {error}",
+                tool.display_name()
+            ))
+        })?;
+        if payload.schema_version != 1 {
+            return Err(CoreError::message(format!(
+                "unsupported {} catalog metadata schema version {}: expected 1",
+                tool.display_name(),
+                payload.schema_version
+            )));
+        }
+        if payload.tool != tool.as_str() {
+            return Err(CoreError::message(format!(
+                "{} catalog metadata cannot parse tool `{}`",
+                tool.display_name(),
+                payload.tool
+            )));
+        }
+        if payload.provider != tool.provider_id() {
+            return Err(CoreError::message(format!(
+                "{} catalog metadata cannot parse provider `{}`",
+                tool.display_name(),
+                payload.provider
+            )));
+        }
+
+        let tool_name = tool.tool_name();
+        let provider =
+            ProviderId::new(tool.provider_id()).expect("built-in IaC provider id should be valid");
+        let releases = payload
+            .releases
+            .into_iter()
+            .map(|release| {
+                iac_remote_release_from_catalog_payload(tool, &tool_name, &provider, release)
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self {
+            tool,
+            index: RemoteReleaseIndex::new(tool_name, provider, releases),
+        })
+    }
+
+    pub fn release_index(&self) -> &RemoteReleaseIndex {
+        &self.index
+    }
+
+    pub fn into_release_index(self) -> RemoteReleaseIndex {
+        self.index
+    }
+
+    pub fn into_release_metadata(self) -> CoreResult<IacReleaseMetadata> {
+        IacReleaseMetadata::from_release_index(self.tool, &self.index)
+    }
+
+    pub fn tool(&self) -> IacTool {
+        self.tool
     }
 }
 
@@ -546,14 +748,20 @@ impl ArtifactResolver for IacArtifactResolver {
                     platform.id()
                 ))
             })?;
+        let archive_type = archive_type_for_iac_file(file.filename());
+        let artifact_filename = if archive_type == ArchiveType::PlainFile {
+            self.tool.binary_name()
+        } else {
+            file.filename()
+        };
         let url = file
             .url()
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| default_iac_artifact_url(self.tool, release.version(), file));
         let mut artifact = Artifact::new(
             url,
-            self.tool.binary_name(),
-            ArchiveType::PlainFile,
+            artifact_filename,
+            archive_type,
             file.sha256().map(ToOwned::to_owned),
         );
         if let Some(size) = file.size() {
@@ -806,6 +1014,444 @@ fn parse_iac_release_file(value: &toml::Value) -> CoreResult<IacReleaseFile> {
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct TerraformOfficialIndexPayload {
+    #[serde(default)]
+    versions: BTreeMap<String, TerraformVersionPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerraformVersionPayload {
+    #[serde(default)]
+    builds: Vec<TerraformBuildPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerraformBuildPayload {
+    arch: String,
+    os: String,
+    filename: String,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenTofuReleasePayload {
+    tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    assets: Vec<OpenTofuAssetPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenTofuAssetPayload {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IacCatalogPayload {
+    schema_version: u32,
+    tool: String,
+    provider: String,
+    #[serde(default)]
+    releases: Vec<IacCatalogReleasePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IacCatalogReleasePayload {
+    version: String,
+    #[serde(default = "default_true")]
+    stable: bool,
+    #[serde(default)]
+    yanked: bool,
+    #[serde(default)]
+    yanked_reason: Option<String>,
+    #[serde(default)]
+    upstream_version: Option<String>,
+    #[serde(default)]
+    artifacts: Vec<IacCatalogArtifactPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IacCatalogArtifactPayload {
+    filename: String,
+    os: String,
+    arch: String,
+    url: String,
+    #[serde(default)]
+    checksum: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default = "default_single_binary_kind")]
+    kind: String,
+    #[serde(default = "default_true")]
+    installable: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_single_binary_kind() -> String {
+    "single-binary".to_owned()
+}
+
+pub fn parse_iac_sha256s(input: &str) -> CoreResult<BTreeMap<String, String>> {
+    let mut checksums = BTreeMap::new();
+    for (line_index, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let checksum = parts.next().ok_or_else(|| {
+            CoreError::message(format!(
+                "invalid IaC checksum line {}: missing checksum",
+                line_index + 1
+            ))
+        })?;
+        let filename = parts.next().ok_or_else(|| {
+            CoreError::message(format!(
+                "invalid IaC checksum line {}: missing filename",
+                line_index + 1
+            ))
+        })?;
+        if parts.next().is_some() {
+            return Err(CoreError::message(format!(
+                "invalid IaC checksum line {}: expected `<sha256>  <filename>`",
+                line_index + 1
+            )));
+        }
+        if checksum.len() != 64
+            || !checksum
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(CoreError::message(format!(
+                "invalid IaC checksum line {}: checksum for `{filename}` is not a sha256 hex digest",
+                line_index + 1
+            )));
+        }
+        checksums.insert(filename.to_owned(), format!("sha256:{checksum}"));
+    }
+
+    Ok(checksums)
+}
+
+fn terraform_remote_release_from_official_payload(
+    tool: IacTool,
+    tool_name: &ToolName,
+    provider: &ProviderId,
+    version: &str,
+    release: TerraformVersionPayload,
+    checksums_by_version: &BTreeMap<String, String>,
+) -> CoreResult<RemoteRelease> {
+    let normalized = normalize_iac_version(version)?;
+    let version = Version::new(&normalized)?;
+    let checksums = checksums_for_iac_release(tool, &normalized, checksums_by_version)?;
+    let artifacts = release
+        .builds
+        .into_iter()
+        .filter_map(terraform_archive_from_build)
+        .map(|archive| {
+            iac_remote_artifact_from_official_archive(
+                tool_name, provider, &version, archive, &checksums,
+            )
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(RemoteRelease::new(version, artifacts)
+        .with_metadata_field("upstream_version", normalized)
+        .with_metadata_field("stable", "true"))
+}
+
+fn opentofu_remote_release_from_official_payload(
+    tool: IacTool,
+    tool_name: &ToolName,
+    provider: &ProviderId,
+    release: OpenTofuReleasePayload,
+    checksums_by_version: &BTreeMap<String, String>,
+) -> CoreResult<RemoteRelease> {
+    let normalized = normalize_iac_version(&release.tag_name)?;
+    let version = Version::new(&normalized)?;
+    let checksums = checksums_for_iac_release(tool, &normalized, checksums_by_version)?;
+    let artifacts = release
+        .assets
+        .into_iter()
+        .filter_map(opentofu_archive_from_asset)
+        .map(|archive| {
+            iac_remote_artifact_from_official_archive(
+                tool_name, provider, &version, archive, &checksums,
+            )
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(RemoteRelease::new(version, artifacts)
+        .with_metadata_field("upstream_version", release.tag_name)
+        .with_metadata_field("stable", (!release.prerelease).to_string()))
+}
+
+fn iac_remote_release_from_catalog_payload(
+    tool: IacTool,
+    tool_name: &ToolName,
+    provider: &ProviderId,
+    release: IacCatalogReleasePayload,
+) -> CoreResult<RemoteRelease> {
+    let normalized = normalize_iac_version(&release.version)?;
+    let version = Version::new(&normalized)?;
+    let stable = release.stable.to_string();
+    let yanked = release.yanked.to_string();
+    let artifacts = release
+        .artifacts
+        .into_iter()
+        .filter_map(|artifact| {
+            iac_remote_artifact_from_catalog_payload(tool, tool_name, provider, &version, artifact)
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    let upstream_version = release
+        .upstream_version
+        .unwrap_or_else(|| version.raw().to_owned());
+    let mut remote_release = RemoteRelease::new(version, artifacts)
+        .with_metadata_field("upstream_version", upstream_version)
+        .with_metadata_field("stable", stable)
+        .with_metadata_field("yanked", yanked);
+    if let Some(reason) = release.yanked_reason {
+        remote_release = remote_release.with_metadata_field("yanked_reason", reason);
+    }
+
+    Ok(remote_release)
+}
+
+fn checksums_for_iac_release(
+    tool: IacTool,
+    version: &str,
+    checksums_by_version: &BTreeMap<String, String>,
+) -> CoreResult<BTreeMap<String, String>> {
+    let checksums = checksums_by_version.get(version).ok_or_else(|| {
+        CoreError::message(format!(
+            "invalid {} official metadata: missing checksum payload for {}",
+            tool.display_name(),
+            version
+        ))
+    })?;
+    parse_iac_sha256s(checksums)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IacOfficialArchive {
+    filename: String,
+    url: String,
+    os: &'static str,
+    arch: &'static str,
+    platform: Platform,
+}
+
+fn terraform_archive_from_build(build: TerraformBuildPayload) -> Option<IacOfficialArchive> {
+    let (os, platform_os) = official_iac_os(&build.os)?;
+    let (arch, platform_arch) = official_iac_arch(&build.arch)?;
+    let url = build
+        .url
+        .unwrap_or_else(|| format!("{TERRAFORM_OFFICIAL_BASE_URL}/unknown/{}", build.filename));
+
+    Some(IacOfficialArchive {
+        filename: build.filename,
+        url,
+        os,
+        arch,
+        platform: Platform::new(platform_os, platform_arch),
+    })
+}
+
+fn opentofu_archive_from_asset(asset: OpenTofuAssetPayload) -> Option<IacOfficialArchive> {
+    if !asset.name.ends_with(".zip") || !asset.name.starts_with("tofu_") {
+        return None;
+    }
+    let filename = asset.name;
+    let stem = filename.strip_suffix(".zip")?;
+    let mut parts = stem.split('_').collect::<Vec<_>>();
+    if parts.len() < 4 {
+        return None;
+    }
+    let arch_raw = parts.pop()?;
+    let os_raw = parts.pop()?;
+    let (os, platform_os) = official_iac_os(os_raw)?;
+    let (arch, platform_arch) = official_iac_arch(arch_raw)?;
+
+    Some(IacOfficialArchive {
+        filename,
+        url: asset.browser_download_url,
+        os,
+        arch,
+        platform: Platform::new(platform_os, platform_arch),
+    })
+}
+
+fn iac_remote_artifact_from_official_archive(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release_version: &Version,
+    archive: IacOfficialArchive,
+    checksums: &BTreeMap<String, String>,
+) -> CoreResult<ResolvedArtifact> {
+    let checksum = checksums.get(&archive.filename).ok_or_else(|| {
+        CoreError::message(format!(
+            "invalid IaC official metadata: archive `{}` is missing checksum",
+            archive.filename
+        ))
+    })?;
+    let archive_type = archive_type_for_iac_file(&archive.filename);
+    let artifact = Artifact::new(
+        archive.url.clone(),
+        archive.filename.clone(),
+        archive_type,
+        Some(checksum.clone()),
+    );
+
+    Ok(ResolvedArtifact::new(
+        tool.clone(),
+        provider.clone(),
+        release_version.clone(),
+        archive.platform,
+        artifact,
+    )
+    .with_metadata_field("filename", archive.filename)
+    .with_metadata_field("kind", "binary")
+    .with_metadata_field("iac_os", archive.os)
+    .with_metadata_field("iac_arch", archive.arch))
+}
+
+fn iac_remote_artifact_from_catalog_payload(
+    tool: IacTool,
+    tool_name: &ToolName,
+    provider: &ProviderId,
+    release_version: &Version,
+    artifact: IacCatalogArtifactPayload,
+) -> Option<CoreResult<ResolvedArtifact>> {
+    if !artifact.installable || !iac_catalog_kind_is_binary(&artifact.kind) {
+        return None;
+    }
+    let checksum = artifact
+        .checksum
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_owned();
+
+    let result = (|| {
+        let platform =
+            iac_platform_from_catalog_fields(&artifact.os, &artifact.arch).ok_or_else(|| {
+                CoreError::message(format!(
+                    "invalid {} catalog metadata: unsupported platform {}-{} for `{}`",
+                    tool.display_name(),
+                    artifact.os,
+                    artifact.arch,
+                    artifact.filename
+                ))
+            })?;
+        if !checksum.starts_with("sha256:") {
+            return Err(CoreError::message(format!(
+                "invalid {} catalog metadata: artifact `{}` checksum must use sha256:<hex>",
+                tool.display_name(),
+                artifact.filename
+            )));
+        }
+        let archive_type = archive_type_for_iac_file(&artifact.filename);
+        let mut resolved_artifact = Artifact::new(
+            artifact.url,
+            artifact.filename.clone(),
+            archive_type,
+            Some(checksum),
+        );
+        if let Some(size) = artifact.size {
+            resolved_artifact = resolved_artifact.with_size(size);
+        }
+
+        Ok(ResolvedArtifact::new(
+            tool_name.clone(),
+            provider.clone(),
+            release_version.clone(),
+            platform,
+            resolved_artifact,
+        )
+        .with_metadata_field("filename", artifact.filename)
+        .with_metadata_field("kind", "binary")
+        .with_metadata_field("catalog_kind", artifact.kind)
+        .with_metadata_field("iac_os", normalized_iac_catalog_os(&artifact.os))
+        .with_metadata_field("iac_arch", normalized_iac_catalog_arch(&artifact.arch)))
+    })();
+
+    Some(result)
+}
+
+fn official_iac_os(value: &str) -> Option<(&'static str, OperatingSystem)> {
+    match value {
+        "darwin" => Some(("darwin", OperatingSystem::Macos)),
+        "linux" => Some(("linux", OperatingSystem::Linux)),
+        "windows" => Some(("windows", OperatingSystem::Windows)),
+        _ => None,
+    }
+}
+
+fn official_iac_arch(value: &str) -> Option<(&'static str, Architecture)> {
+    match value {
+        "amd64" => Some(("amd64", Architecture::X64)),
+        "arm64" => Some(("arm64", Architecture::Arm64)),
+        _ => None,
+    }
+}
+
+fn iac_release_from_remote_release(release: &RemoteRelease) -> CoreResult<IacRelease> {
+    let stable = release.metadata_field("stable") != Some("false")
+        && release.metadata_field("yanked") != Some("true");
+    let files = release
+        .artifacts()
+        .iter()
+        .map(iac_release_file_from_remote_artifact)
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(IacRelease {
+        version: release.version().clone(),
+        stable,
+        files,
+    })
+}
+
+fn iac_release_file_from_remote_artifact(
+    resolved: &ResolvedArtifact,
+) -> CoreResult<IacReleaseFile> {
+    let artifact = resolved.artifact();
+    let filename = resolved
+        .metadata_field("filename")
+        .unwrap_or_else(|| artifact.filename())
+        .to_owned();
+    let os = resolved
+        .metadata_field("iac_os")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| iac_artifact_os(resolved.platform()).to_owned());
+    let arch = resolved
+        .metadata_field("iac_arch")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| iac_artifact_arch(resolved.platform()).to_owned());
+    let kind = resolved
+        .metadata_field("kind")
+        .unwrap_or("binary")
+        .to_owned();
+
+    Ok(IacReleaseFile {
+        filename,
+        os,
+        arch,
+        kind,
+        sha256: artifact.checksum().map(ToOwned::to_owned),
+        size: artifact.size(),
+        url: Some(artifact.url().to_owned()),
+    })
+}
+
 fn required_string<'a>(value: &'a toml::Value, key: &str, label: &str) -> CoreResult<&'a str> {
     value.get(key).and_then(toml::Value::as_str).ok_or_else(|| {
         CoreError::message(format!(
@@ -833,6 +1479,41 @@ fn iac_artifact_arch(platform: Platform) -> &'static str {
     }
 }
 
+fn iac_catalog_kind_is_binary(kind: &str) -> bool {
+    matches!(kind, "binary" | "single-binary")
+}
+
+fn iac_platform_from_catalog_fields(os: &str, arch: &str) -> Option<Platform> {
+    let os = match os {
+        "darwin" | "macos" => OperatingSystem::Macos,
+        "linux" => OperatingSystem::Linux,
+        "windows" | "win" => OperatingSystem::Windows,
+        _ => return None,
+    };
+    let arch = match arch {
+        "amd64" | "x64" => Architecture::X64,
+        "arm64" => Architecture::Arm64,
+        _ => return None,
+    };
+
+    Some(Platform::new(os, arch))
+}
+
+fn normalized_iac_catalog_os(os: &str) -> String {
+    match os {
+        "macos" => "darwin".to_owned(),
+        "win" => "windows".to_owned(),
+        value => value.to_owned(),
+    }
+}
+
+fn normalized_iac_catalog_arch(arch: &str) -> String {
+    match arch {
+        "x64" => "amd64".to_owned(),
+        value => value.to_owned(),
+    }
+}
+
 fn default_iac_artifact_url(tool: IacTool, version: &Version, file: &IacReleaseFile) -> String {
     match tool {
         IacTool::Terraform => format!(
@@ -845,6 +1526,14 @@ fn default_iac_artifact_url(tool: IacTool, version: &Version, file: &IacReleaseF
             version.raw(),
             file.filename()
         ),
+    }
+}
+
+fn archive_type_for_iac_file(filename: &str) -> ArchiveType {
+    if filename.ends_with(".zip") {
+        ArchiveType::Zip
+    } else {
+        ArchiveType::PlainFile
     }
 }
 

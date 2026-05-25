@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "tool": "node",
+  "provider": "official",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "source": {
+    "kind": "official-index",
+    "urls": [
+      "https://nodejs.org/dist/index.json",
+      "https://nodejs.org/dist/v20.11.1/SHASUMS256.txt"
+    ],
+    "retrieved_at": "2026-05-22T00:00:00Z",
+    "generator": "devenv-catalog-fixture/0.1.0"
+  },
+  "releases": [
+    {
+      "version": "20.11.1",
+      "normalized_version": "20.11.1",
+      "aliases": [
+        "20",
+        "20.11",
+        "lts"
+      ],
+      "release_date": "2024-02-13",
+      "selectors": {
+        "channel": "lts",
+        "distribution": "node",
+        "implementation": "node",
+        "stable": "true"
+      },
+      "yanked": false,
+      "deprecated": false,
+      "reason": null,
+      "notes_url": "https://nodejs.org/en/blog/release/v20.11.1",
+      "artifacts": [
+        {
+          "platform": {
+            "os": "macos",
+            "arch": "arm64"
+          },
+          "url": "https://nodejs.org/dist/v20.11.1/node-v20.11.1-darwin-arm64.tar.gz",
+          "filename": "node-v20.11.1-darwin-arm64.tar.gz",
+          "archive_type": "tar.gz",
+          "checksum": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "metadata": {
+            "node_os": "darwin",
+            "node_arch": "arm64",
+            "kind": "archive"
+          }
+        },
+        {
+          "platform": {
+            "os": "windows",
+            "arch": "x64"
+          },
+          "url": "https://nodejs.org/dist/v20.11.1/node-v20.11.1-win-x64.zip",
+          "filename": "node-v20.11.1-win-x64.zip",
+          "archive_type": "zip",
+          "checksum": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "metadata": {
+            "node_os": "win",
+            "node_arch": "x64",
+            "kind": "archive"
+          }
+        }
+      ]
+    },
+    {
+      "version": "18.19.0",
+      "normalized_version": "18.19.0",
+      "aliases": [
+        "18",
+        "18.19"
+      ],
+      "release_date": "2023-11-29",
+      "selectors": {
+        "channel": "maintenance",
+        "distribution": "node",
+        "implementation": "node",
+        "stable": "true"
+      },
+      "yanked": false,
+      "deprecated": true,
+      "reason": "example maintenance release retained for compatibility warnings",
+      "notes_url": "https://nodejs.org/en/blog/release/v18.19.0",
+      "artifacts": [
+        {
+          "platform": {
+            "os": "linux",
+            "arch": "x64"
+          },
+          "url": "https://nodejs.org/dist/v18.19.0/node-v18.19.0-linux-x64.tar.xz",
+          "filename": "node-v18.19.0-linux-x64.tar.xz",
+          "archive_type": "tar.xz",
+          "checksum": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "metadata": {
+            "node_os": "linux",
+            "node_arch": "x64",
+            "kind": "archive"
+          }
+        }
+      ]
+    },
+    {
+      "version": "16.20.2",
+      "normalized_version": "16.20.2",
+      "aliases": [
+        "16",
+        "16.20"
+      ],
+      "release_date": "2023-08-08",
+      "selectors": {
+        "channel": "end-of-life",
+        "distribution": "node",
+        "implementation": "node",
+        "stable": "false"
+      },
+      "yanked": true,
+      "deprecated": true,
+      "reason": "example yanked and deprecated release with missing checksum",
+      "notes_url": "https://nodejs.org/en/blog/release/v16.20.2",
+      "artifacts": [
+        {
+          "platform": {
+            "os": "linux",
+            "arch": "x64"
+          },
+          "url": "https://nodejs.org/dist/v16.20.2/node-v16.20.2-linux-x64.tar.xz",
+          "filename": "node-v16.20.2-linux-x64.tar.xz",
+          "archive_type": "tar.xz",
+          "checksum": null,
+          "checksum_algorithm": null,
+          "installable": false,
+          "install_block_reason": "missing checksum",
+          "metadata": {
+            "node_os": "linux",
+            "node_arch": "x64",
+            "kind": "archive"
+          }
+        }
+      ]
+    }
+  ]
+}

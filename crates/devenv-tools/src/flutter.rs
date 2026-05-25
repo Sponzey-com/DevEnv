@@ -1,12 +1,24 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use devenv_core::{
     ActivationPlan, Architecture, ArchiveType, Artifact, ArtifactResolver, CoreError, CoreResult,
-    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform,
-    RegisteredRuntime, RuntimeRegistry, ToolAdapter, ToolMetadata, ToolName, Version,
-    VersionMatcher, VersionRequirement, VersionScheme, VersionSource,
+    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform, ProviderId,
+    RegisteredRuntime, RemoteRelease, RemoteReleaseIndex, ResolvedArtifact, RuntimeRegistry,
+    ToolAdapter, ToolMetadata, ToolName, Version, VersionMatcher, VersionRequirement,
+    VersionScheme, VersionSource,
 };
+use serde::Deserialize;
+
+pub const FLUTTER_OFFICIAL_BASE_URL: &str =
+    "https://storage.googleapis.com/flutter_infra_release/releases";
+pub const FLUTTER_OFFICIAL_MACOS_RELEASES_URL: &str =
+    "https://storage.googleapis.com/flutter_infra_release/releases/releases_macos.json";
+pub const FLUTTER_OFFICIAL_LINUX_RELEASES_URL: &str =
+    "https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json";
+pub const FLUTTER_OFFICIAL_WINDOWS_RELEASES_URL: &str =
+    "https://storage.googleapis.com/flutter_infra_release/releases/releases_windows.json";
 
 #[derive(Debug, Clone)]
 pub struct FlutterToolAdapter {
@@ -283,6 +295,23 @@ impl FlutterReleaseMetadata {
         &self.releases
     }
 
+    pub fn from_release_index(index: &RemoteReleaseIndex) -> CoreResult<Self> {
+        if index.tool().as_str() != "flutter" {
+            return Err(CoreError::message(format!(
+                "Flutter release metadata cannot be built from `{}` index",
+                index.tool()
+            )));
+        }
+
+        let releases = index
+            .releases()
+            .iter()
+            .map(flutter_release_from_remote_release)
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self { releases })
+    }
+
     fn release_for_version(&self, version: &Version) -> CoreResult<&FlutterRelease> {
         if let Some(exact) = self
             .releases()
@@ -316,6 +345,121 @@ impl FlutterReleaseMetadata {
                 ))
             })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlutterOfficialReleaseMetadata {
+    index: RemoteReleaseIndex,
+}
+
+impl FlutterOfficialReleaseMetadata {
+    pub fn parse_stable(platform_payloads: &BTreeMap<String, String>) -> CoreResult<Self> {
+        let tool = flutter_tool_name();
+        let provider =
+            ProviderId::new("stable").expect("built-in Flutter provider id should be valid");
+        let mut releases = BTreeMap::<String, FlutterOfficialReleaseBuilder>::new();
+
+        for (platform_name, payload) in platform_payloads {
+            let os = flutter_official_platform_os(platform_name)?;
+            let payload =
+                serde_json::from_str::<FlutterOfficialIndexPayload>(payload).map_err(|error| {
+                    CoreError::message(format!(
+                        "failed to parse Flutter official {platform_name} releases: {error}"
+                    ))
+                })?;
+            let base_url = payload
+                .base_url
+                .as_deref()
+                .unwrap_or(FLUTTER_OFFICIAL_BASE_URL);
+
+            for release in payload
+                .releases
+                .into_iter()
+                .filter(|release| release.channel == "stable")
+            {
+                let version_raw = normalize_flutter_version(&release.version)?;
+                let version = Version::new(&version_raw)?;
+                let Some(artifact) = flutter_remote_artifact_from_official_release(
+                    &tool, &provider, &version, os, base_url, release,
+                )?
+                else {
+                    continue;
+                };
+
+                releases
+                    .entry(version_raw)
+                    .or_insert_with(|| FlutterOfficialReleaseBuilder::new(version))
+                    .artifacts
+                    .push(artifact);
+            }
+        }
+
+        let releases = releases
+            .into_values()
+            .map(|release| {
+                RemoteRelease::new(release.version, release.artifacts)
+                    .with_metadata_field("channel", "stable")
+                    .with_metadata_field("stable", "true")
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Self {
+            index: RemoteReleaseIndex::new(tool, provider, releases),
+        })
+    }
+
+    pub fn release_index(&self) -> &RemoteReleaseIndex {
+        &self.index
+    }
+
+    pub fn into_release_index(self) -> RemoteReleaseIndex {
+        self.index
+    }
+
+    pub fn into_release_metadata(self) -> CoreResult<FlutterReleaseMetadata> {
+        FlutterReleaseMetadata::from_release_index(&self.index)
+    }
+}
+
+#[derive(Debug)]
+struct FlutterOfficialReleaseBuilder {
+    version: Version,
+    artifacts: Vec<ResolvedArtifact>,
+}
+
+impl FlutterOfficialReleaseBuilder {
+    fn new(version: Version) -> Self {
+        Self {
+            version,
+            artifacts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FlutterOfficialIndexPayload {
+    #[serde(default)]
+    base_url: Option<String>,
+    releases: Vec<FlutterOfficialReleasePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FlutterOfficialReleasePayload {
+    hash: String,
+    channel: String,
+    version: String,
+    #[serde(default)]
+    dart_sdk_version: Option<String>,
+    #[serde(default)]
+    dart_sdk_arch: Option<String>,
+    #[serde(default)]
+    arch: Option<String>,
+    #[serde(default)]
+    release_date: Option<String>,
+    archive: String,
+    sha256: String,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -663,6 +807,185 @@ fn parse_flutter_release_file(value: &toml::Value) -> CoreResult<FlutterReleaseF
     })
 }
 
+fn flutter_remote_artifact_from_official_release(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release_version: &Version,
+    os: OperatingSystem,
+    base_url: &str,
+    release: FlutterOfficialReleasePayload,
+) -> CoreResult<Option<ResolvedArtifact>> {
+    let Some(architecture) = flutter_official_architecture(
+        &release.archive,
+        release.dart_sdk_arch.as_deref().or(release.arch.as_deref()),
+    ) else {
+        return Ok(None);
+    };
+    let platform = Platform::new(os, architecture);
+    let filename = release
+        .archive
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CoreError::message(format!(
+                "invalid Flutter official metadata: archive path `{}` has no filename",
+                release.archive
+            ))
+        })?
+        .to_owned();
+    let archive_type = archive_type_for_flutter_file(&filename)?;
+    let checksum = normalize_flutter_official_sha256(&filename, &release.sha256)?;
+    let url = flutter_official_artifact_url(base_url, &release.archive);
+    let mut artifact = Artifact::new(url, filename.clone(), archive_type, Some(checksum));
+    if let Some(size) = release.size {
+        artifact = artifact.with_size(size);
+    }
+
+    let mut resolved = ResolvedArtifact::new(
+        tool.clone(),
+        provider.clone(),
+        release_version.clone(),
+        platform,
+        artifact,
+    )
+    .with_metadata_field("filename", filename)
+    .with_metadata_field("kind", "archive")
+    .with_metadata_field("channel", release.channel)
+    .with_metadata_field("flutter_os", flutter_artifact_os(platform))
+    .with_metadata_field("flutter_arch", flutter_artifact_arch(platform))
+    .with_metadata_field("hash", release.hash)
+    .with_metadata_field("archive", release.archive);
+    if let Some(dart_sdk_version) = release.dart_sdk_version {
+        resolved = resolved.with_metadata_field("dart_sdk_version", dart_sdk_version);
+    }
+    if let Some(release_date) = release.release_date {
+        resolved = resolved.with_metadata_field("release_date", release_date);
+    }
+
+    Ok(Some(resolved))
+}
+
+fn flutter_release_from_remote_release(release: &RemoteRelease) -> CoreResult<FlutterRelease> {
+    let channel = release
+        .metadata_field("channel")
+        .unwrap_or("stable")
+        .to_owned();
+    let stable = release.metadata_field("stable") != Some("false") && channel == "stable";
+    let files = release
+        .artifacts()
+        .iter()
+        .map(flutter_release_file_from_remote_artifact)
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(FlutterRelease {
+        version: release.version().clone(),
+        channel,
+        stable,
+        files,
+    })
+}
+
+fn flutter_release_file_from_remote_artifact(
+    resolved: &ResolvedArtifact,
+) -> CoreResult<FlutterReleaseFile> {
+    let artifact = resolved.artifact();
+    let filename = resolved
+        .metadata_field("filename")
+        .unwrap_or_else(|| artifact.filename())
+        .to_owned();
+    let os = resolved
+        .metadata_field("flutter_os")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| flutter_artifact_os(resolved.platform()).to_owned());
+    let arch = resolved
+        .metadata_field("flutter_arch")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| flutter_artifact_arch(resolved.platform()).to_owned());
+    let kind = resolved
+        .metadata_field("kind")
+        .unwrap_or("archive")
+        .to_owned();
+
+    Ok(FlutterReleaseFile {
+        filename,
+        os,
+        arch,
+        kind,
+        sha256: artifact.checksum().map(ToOwned::to_owned),
+        size: artifact.size(),
+        url: Some(artifact.url().to_owned()),
+    })
+}
+
+fn flutter_official_platform_os(platform_name: &str) -> CoreResult<OperatingSystem> {
+    match platform_name {
+        "macos" | "darwin" => Ok(OperatingSystem::Macos),
+        "linux" => Ok(OperatingSystem::Linux),
+        "windows" | "win" => Ok(OperatingSystem::Windows),
+        other => Err(CoreError::message(format!(
+            "unsupported Flutter official releases platform `{other}`"
+        ))),
+    }
+}
+
+fn flutter_official_architecture(
+    archive_path: &str,
+    declared_arch: Option<&str>,
+) -> Option<Architecture> {
+    if let Some(architecture) = declared_arch.and_then(normalize_flutter_official_architecture) {
+        return Some(architecture);
+    }
+
+    let archive_path = archive_path.to_ascii_lowercase();
+    if archive_path.contains("_arm64_")
+        || archive_path.contains("-arm64")
+        || archive_path.contains("/arm64")
+    {
+        return Some(Architecture::Arm64);
+    }
+    if archive_path.contains("_x64_")
+        || archive_path.contains("-x64")
+        || archive_path.contains("_x64.")
+    {
+        return Some(Architecture::X64);
+    }
+
+    Some(Architecture::X64)
+}
+
+fn normalize_flutter_official_architecture(value: &str) -> Option<Architecture> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "x64" | "amd64" | "x86_64" | "x86-64" => Some(Architecture::X64),
+        "arm64" | "aarch64" => Some(Architecture::Arm64),
+        _ => None,
+    }
+}
+
+fn normalize_flutter_official_sha256(filename: &str, value: &str) -> CoreResult<String> {
+    let value = value.trim();
+    let value = value.strip_prefix("sha256:").unwrap_or(value);
+    if value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(CoreError::message(format!(
+            "invalid Flutter official metadata: archive `{filename}` has an invalid sha256 checksum"
+        )));
+    }
+
+    Ok(format!("sha256:{value}"))
+}
+
+fn flutter_official_artifact_url(base_url: &str, archive_path: &str) -> String {
+    if archive_path.starts_with("http://") || archive_path.starts_with("https://") {
+        archive_path.to_owned()
+    } else {
+        format!(
+            "{}/{}",
+            base_url.trim_end_matches('/'),
+            archive_path.trim_start_matches('/')
+        )
+    }
+}
+
 fn required_string<'a>(value: &'a toml::Value, key: &str, label: &str) -> CoreResult<&'a str> {
     value.get(key).and_then(toml::Value::as_str).ok_or_else(|| {
         CoreError::message(format!(
@@ -693,11 +1016,13 @@ fn flutter_artifact_arch(platform: Platform) -> &'static str {
 fn archive_type_for_flutter_file(filename: &str) -> CoreResult<ArchiveType> {
     if filename.ends_with(".tar.gz") {
         Ok(ArchiveType::TarGz)
+    } else if filename.ends_with(".tar.xz") {
+        Ok(ArchiveType::TarXz)
     } else if filename.ends_with(".zip") {
         Ok(ArchiveType::Zip)
     } else {
         Err(CoreError::message(format!(
-            "unsupported Flutter archive `{filename}`: expected .tar.gz or .zip"
+            "unsupported Flutter archive `{filename}`: expected .tar.gz, .tar.xz, or .zip"
         )))
     }
 }

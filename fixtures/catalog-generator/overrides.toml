@@ -1,0 +1,7 @@
+[[release]]
+tool = "go"
+version = "1.21.0"
+stable = false
+yanked = true
+deprecated = true
+reason = "manual yanked release for generator fixture"

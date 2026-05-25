@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "catalog_id": "dev.devenv.catalog",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "expires_at": "2026-05-29T00:00:00Z",
+  "catalog_version": "2026.05.22.1",
+  "min_devenv_version": "0.1.0",
+  "sequence": 1,
+  "entries": [
+    {
+      "tool": "go",
+      "provider": "official",
+      "path": "tools/go/official/releases.json",
+      "sha256": "sha256:f56370a548e791100eeed7dc4fdefde3edfe0bdc3aeca953166862ca3cf2014d",
+      "payload_kind": "normalized-release-index",
+      "ttl_seconds": 86400,
+      "platforms": [
+        "linux-x64",
+        "macos-arm64"
+      ],
+      "selector": {
+        "channel": "stable",
+        "distribution": "go"
+      }
+    },
+    {
+      "tool": "node",
+      "provider": "official",
+      "path": "tools/node/official/releases.json",
+      "sha256": "sha256:3878f041c9b0f044930ef4113f4aa082a226e8178bce9541d962b3a5ab67dade",
+      "payload_kind": "normalized-release-index",
+      "ttl_seconds": 86400,
+      "platforms": [
+        "linux-x64",
+        "macos-arm64"
+      ],
+      "selector": {
+        "channel": "stable",
+        "distribution": "node",
+        "implementation": "node"
+      }
+    }
+  ],
+  "metadata": {
+    "generator": "devenv-catalog/0.1.0",
+    "publisher": "DevEnv catalog generator"
+  }
+}

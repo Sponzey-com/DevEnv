@@ -47,6 +47,18 @@ impl DevEnvHome {
         self.root.join("downloads")
     }
 
+    pub fn cache_dir(&self) -> PathBuf {
+        self.root.join("cache")
+    }
+
+    pub fn metadata_cache_dir(&self) -> PathBuf {
+        self.cache_dir().join("metadata")
+    }
+
+    pub fn download_cache_dir(&self) -> PathBuf {
+        self.cache_dir().join("downloads")
+    }
+
     pub fn shims_dir(&self) -> PathBuf {
         self.root.join("shims")
     }
@@ -67,6 +79,8 @@ impl DevEnvHome {
         for directory in [
             self.installs_dir(),
             self.registry_dir(),
+            self.metadata_cache_dir(),
+            self.download_cache_dir(),
             self.downloads_dir(),
             self.shims_dir(),
             self.state_dir(),

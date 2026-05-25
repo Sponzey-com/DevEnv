@@ -40,7 +40,7 @@ impl ChecksumVerifier for Sha256ChecksumVerifier {
     }
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+pub fn hex_sha256(bytes: &[u8]) -> String {
     sha256(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

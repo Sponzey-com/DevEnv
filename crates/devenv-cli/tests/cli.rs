@@ -1,8 +1,12 @@
 use assert_cmd::Command;
+use devenv_adapters::checksum::hex_sha256;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 #[test]
 fn version_command_prints_binary_name_and_version() {
@@ -161,6 +165,25 @@ fn adr_records_the_binary_name_used_by_tests() {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", adr_path.display()));
 
     assert!(adr.contains("Chosen binary name: `devenv`"));
+}
+
+#[test]
+fn python_install_strategy_adr_records_deferred_live_provider() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let adr_path = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("crate should live under crates/devenv-cli")
+        .join("docs/adr/0008-python-install-strategy.md");
+
+    let adr = std::fs::read_to_string(&adr_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", adr_path.display()));
+
+    assert!(adr.contains("CPython source build"));
+    assert!(adr.contains("python-build"));
+    assert!(adr.contains("uv managed Python"));
+    assert!(adr.contains("LocalOnly"));
+    assert!(adr.contains("defer live Python Direct install"));
 }
 
 #[test]
@@ -1232,13 +1255,84 @@ fn list_remote_go_uses_fixture_release_metadata() {
 }
 
 #[test]
+fn list_remote_go_fixture_override_wins_over_official_fixture() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_go_archive(temp.path());
+    let metadata = write_go_release_metadata_fixture(temp.path(), &archive);
+    let official = write_go_official_release_metadata_fixture(temp.path(), &archive);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_GO_RELEASE_METADATA", &metadata)
+        .env("DEVENV_GO_OFFICIAL_RELEASE_METADATA", &official)
+        .arg("list-remote")
+        .arg("go")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.22.5"))
+        .stdout(predicate::str::contains("go 1.23.4").not());
+}
+
+#[test]
+fn list_remote_go_refresh_writes_official_cache_and_offline_reads_it() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let official = write_go_official_release_metadata_fixture(temp.path(), &archive);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_GO_OFFICIAL_RELEASE_METADATA", &official)
+        .arg("list-remote")
+        .arg("go")
+        .arg("--refresh")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.23.4"))
+        .stdout(predicate::str::contains("go1.23.4").not())
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_GO_RELEASE_METADATA")
+        .env_remove("DEVENV_GO_OFFICIAL_RELEASE_METADATA")
+        .arg("list-remote")
+        .arg("go")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.23.4"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_GO_RELEASE_METADATA")
+        .env_remove("DEVENV_GO_OFFICIAL_RELEASE_METADATA")
+        .arg("list-remote")
+        .arg("go")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.23.4"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
 fn list_remote_go_reports_missing_metadata_source() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
 
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
         .current_dir(temp.path())
+        .env("DEVENV_HOME", temp.path().join("devenv-home"))
         .env_remove("DEVENV_GO_RELEASE_METADATA")
+        .env_remove("DEVENV_GO_OFFICIAL_RELEASE_METADATA")
         .arg("list-remote")
         .arg("go")
         .assert()
@@ -1328,6 +1422,58 @@ fn list_remote_flutter_uses_fixture_release_metadata() {
 }
 
 #[test]
+fn list_remote_flutter_rejects_unsupported_channel() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("list-remote")
+        .arg("flutter")
+        .arg("--channel")
+        .arg("beta")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported channel `beta`"))
+        .stderr(predicate::str::contains("supported channels: stable"))
+        .stderr(predicate::str::contains("not implemented yet"))
+        .stderr(predicate::str::contains("devenv provider info flutter"));
+}
+
+#[test]
+fn list_remote_flutter_refresh_writes_official_http_cache_and_offline_reads_it() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let base_url = serve_flutter_official_metadata();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_FLUTTER_OFFICIAL_BASE_URL", &base_url)
+        .arg("list-remote")
+        .arg("flutter")
+        .arg("--refresh")
+        .arg("--channel")
+        .arg("stable")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("flutter 3.24.0 stable"))
+        .stdout(predicate::str::contains("3.25.0").not())
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_FLUTTER_OFFICIAL_BASE_URL")
+        .arg("list-remote")
+        .arg("flutter")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("flutter 3.24.0 stable"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
 fn list_remote_terraform_uses_fixture_release_metadata() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let binary = write_fake_iac_binary(temp.path(), "terraform.fixture");
@@ -1362,6 +1508,72 @@ fn list_remote_opentofu_uses_fixture_release_metadata() {
 }
 
 #[test]
+fn list_remote_terraform_refresh_writes_official_http_cache_and_offline_reads_it() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let base_url = serve_iac_official_metadata(IacFixtureTool::Terraform);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_TERRAFORM_OFFICIAL_BASE_URL", &base_url)
+        .arg("list-remote")
+        .arg("terraform")
+        .arg("--refresh")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("terraform 1.8.5"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_TERRAFORM_OFFICIAL_BASE_URL")
+        .arg("list-remote")
+        .arg("terraform")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("terraform 1.8.5"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn list_remote_opentofu_refresh_writes_official_http_cache_and_offline_reads_it() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let base_url = serve_iac_official_metadata(IacFixtureTool::OpenTofu);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_OPENTOFU_OFFICIAL_BASE_URL", &base_url)
+        .arg("list-remote")
+        .arg("opentofu")
+        .arg("--refresh")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("opentofu 1.8.5"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_OPENTOFU_OFFICIAL_BASE_URL")
+        .arg("list-remote")
+        .arg("opentofu")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("opentofu 1.8.5"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
 fn list_remote_node_uses_fixture_release_metadata() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let archive = write_fake_node_archive(temp.path());
@@ -1377,6 +1589,64 @@ fn list_remote_node_uses_fixture_release_metadata() {
         .success()
         .stdout(predicate::str::contains("node 20.11.1"))
         .stdout(predicate::str::contains("node v20.11.1").not());
+}
+
+#[test]
+fn list_remote_node_fixture_override_wins_over_official_fixture() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_node_archive(temp.path());
+    let metadata = write_node_release_metadata_fixture(temp.path(), &archive);
+    let official_index = write_node_official_index_fixture(temp.path());
+    let shasums_dir = write_node_official_shasums_fixtures(temp.path());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_NODE_RELEASE_METADATA", &metadata)
+        .env("DEVENV_NODE_OFFICIAL_RELEASE_INDEX", &official_index)
+        .env("DEVENV_NODE_OFFICIAL_SHASUMS_DIR", &shasums_dir)
+        .arg("list-remote")
+        .arg("node")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("node 20.11.1"))
+        .stdout(predicate::str::contains("node 21.2.0").not());
+}
+
+#[test]
+fn list_remote_node_refresh_writes_official_http_cache_and_offline_reads_it() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let base_url = serve_node_official_metadata();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_NODE_OFFICIAL_BASE_URL", &base_url)
+        .arg("list-remote")
+        .arg("node")
+        .arg("--refresh")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("node 21.2.0"))
+        .stdout(predicate::str::contains("node 20.11.1"))
+        .stdout(predicate::str::contains("node v20.11.1").not())
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_NODE_OFFICIAL_BASE_URL")
+        .arg("list-remote")
+        .arg("node")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("node 21.2.0"))
+        .stdout(predicate::str::contains("node 20.11.1"))
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]
@@ -1409,10 +1679,1244 @@ fn list_remote_java_uses_fixture_temurin_metadata() {
         .env("DEVENV_JAVA_RELEASE_METADATA", &metadata)
         .arg("list-remote")
         .arg("java")
+        .arg("--distribution")
+        .arg("temurin")
         .assert()
         .success()
         .stdout(predicate::str::contains("java 17 temurin"))
         .stdout(predicate::str::contains("java 17.0.11 temurin"));
+}
+
+#[test]
+fn list_remote_java_uses_temurin_api_fixture_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_java_archive(temp.path());
+    let metadata = write_java_temurin_release_metadata_fixture(temp.path(), &archive);
+    let devenv_home = temp.path().join("devenv-home");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_JAVA_TEMURIN_RELEASE_METADATA", &metadata)
+        .arg("list-remote")
+        .arg("java")
+        .arg("--distribution")
+        .arg("temurin")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("java 21 temurin"))
+        .stdout(predicate::str::contains("java 21.0.2 temurin"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn list_remote_java_rejects_unsupported_distribution() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("list-remote")
+        .arg("java")
+        .arg("--distribution")
+        .arg("zulu")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported distribution `zulu`"))
+        .stderr(predicate::str::contains("supported distributions: temurin"))
+        .stderr(predicate::str::contains("not implemented yet"))
+        .stderr(predicate::str::contains("devenv provider info java"));
+}
+
+#[test]
+fn metadata_help_command_prints_usage() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("metadata")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Usage: devenv metadata <status|update|verify-catalog> [args]",
+        ))
+        .stdout(predicate::str::contains("status [tool]"))
+        .stdout(predicate::str::contains("update <tool|--all>"))
+        .stdout(predicate::str::contains("verify-catalog [tool]"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn catalog_diagnostics_metadata_help_mentions_verify_catalog() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("metadata")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "verify-catalog [tool] [--catalog <path-or-url>] [--source catalog|file]",
+        ))
+        .stdout(predicate::str::contains(
+            "devenv metadata verify-catalog go --catalog ./v1 --source file",
+        ))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn metadata_status_reports_all_provider_cache_status() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", temp.path().join("devenv-home"))
+        .arg("metadata")
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Metadata status"))
+        .stdout(predicate::str::contains("go official support=Direct"))
+        .stdout(predicate::str::contains("rust rustup support=Delegated"))
+        .stdout(predicate::str::contains("ruby local support=LocalOnly"))
+        .stdout(predicate::str::contains("cache=missing"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn metadata_status_go_reports_go_provider_and_cache_state() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", temp.path().join("devenv-home"))
+        .arg("metadata")
+        .arg("status")
+        .arg("go")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go official support=Direct"))
+        .stdout(predicate::str::contains("source=official-api"))
+        .stdout(predicate::str::contains("checksum=required"))
+        .stdout(predicate::str::contains("cache=missing"))
+        .stdout(predicate::str::contains("metadata_source=missing"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn metadata_status_python_reports_deferred_live_provider_strategy() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", temp.path().join("devenv-home"))
+        .arg("metadata")
+        .arg("status")
+        .arg("python")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("python cpython support=Direct"))
+        .stdout(predicate::str::contains("source=local-fixture"))
+        .stdout(predicate::str::contains("cache=missing"))
+        .stdout(predicate::str::contains(
+            "Live CPython direct provider is deferred",
+        ))
+        .stdout(predicate::str::contains(
+            "docs/adr/0008-python-install-strategy.md",
+        ))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn metadata_update_go_writes_fixture_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_go_archive(temp.path());
+    let metadata = write_go_release_metadata_fixture(temp.path(), &archive);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_GO_RELEASE_METADATA", &metadata)
+        .arg("metadata")
+        .arg("update")
+        .arg("go")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go official updated cache=fresh"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("metadata")
+        .arg("status")
+        .arg("go")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go official support=Direct"))
+        .stdout(predicate::str::contains("cache=fresh"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn metadata_update_go_writes_official_fixture_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let official = write_go_official_release_metadata_fixture(temp.path(), &archive);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_GO_OFFICIAL_RELEASE_METADATA", &official)
+        .arg("metadata")
+        .arg("update")
+        .arg("go")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go official updated cache=fresh"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_GO_OFFICIAL_RELEASE_METADATA")
+        .arg("list-remote")
+        .arg("go")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.23.4"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn go_catalog_metadata_update_writes_cache_and_status_digests() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let catalog = write_go_catalog_fixture(temp.path(), &archive, false);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("go")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go official updated cache=fresh"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("metadata")
+        .arg("status")
+        .arg("go")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go official support=Direct"))
+        .stdout(predicate::str::contains("cache=fresh"))
+        .stdout(predicate::str::contains("metadata_source=catalog"))
+        .stdout(predicate::str::contains("cache_source=catalog"))
+        .stdout(predicate::str::contains("catalog_version=2026.05.22.1"))
+        .stdout(predicate::str::contains(format!(
+            "manifest_sha256={}",
+            catalog.manifest_sha256
+        )))
+        .stdout(predicate::str::contains(format!(
+            "payload_sha256={}",
+            catalog.payload_sha256
+        )))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn go_catalog_list_remote_offline_reads_catalog_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let catalog = write_go_catalog_fixture(temp.path(), &archive, false);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("go")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("list-remote")
+        .arg("go")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.23.4"))
+        .stdout(predicate::str::contains("go 1.23.5").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn go_catalog_install_dry_run_resolves_minor_from_catalog_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let catalog = write_go_catalog_fixture(temp.path(), &archive, false);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("go")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("install")
+        .arg("go@1.23")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("requested go@1.23"))
+        .stdout(predicate::str::contains("resolved 1.23.4"))
+        .stdout(predicate::str::contains("provider official"))
+        .stdout(predicate::str::contains(archive.to_string_lossy()))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn go_catalog_env_fixture_override_wins_over_catalog_source() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let fixture_archive = write_fake_go_archive(temp.path());
+    let fixture_metadata = write_go_release_metadata_fixture(temp.path(), &fixture_archive);
+    let catalog_archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let catalog = write_go_catalog_fixture(temp.path(), &catalog_archive, false);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_GO_RELEASE_METADATA", &fixture_metadata)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("go")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_GO_RELEASE_METADATA")
+        .arg("list-remote")
+        .arg("go")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.22.5"))
+        .stdout(predicate::str::contains("go 1.23.4").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn go_catalog_payload_checksum_mismatch_blocks_cache_write() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let catalog = write_go_catalog_fixture(temp.path(), &archive, true);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("go")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("catalog trust failure"))
+        .stderr(predicate::str::contains("checksum mismatch"));
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("metadata")
+        .arg("status")
+        .arg("go")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cache=missing"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn catalog_diagnostics_verify_catalog_local_file_succeeds() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let catalog = write_go_catalog_fixture(temp.path(), &archive, false);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .arg("metadata")
+        .arg("verify-catalog")
+        .arg("go")
+        .arg("--catalog")
+        .arg(&catalog.root_path)
+        .arg("--source")
+        .arg("file")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Catalog verification"))
+        .stdout(predicate::str::contains("source file"))
+        .stdout(predicate::str::contains("catalog_version 2026.05.22.1"))
+        .stdout(predicate::str::contains(format!(
+            "manifest_sha256 {}",
+            catalog.manifest_sha256
+        )))
+        .stdout(predicate::str::contains(
+            "entry go official path=tools/go/official/releases.json",
+        ))
+        .stdout(predicate::str::contains("status=verified"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn catalog_diagnostics_unavailable_error_has_next_action() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env_remove("DEVENV_CATALOG_BASE_URL")
+        .arg("metadata")
+        .arg("verify-catalog")
+        .arg("go")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("catalog unavailable"))
+        .stderr(predicate::str::contains("DEVENV_CATALOG_BASE_URL"))
+        .stderr(predicate::str::contains("--catalog <path-or-url>"))
+        .stderr(predicate::str::contains("next:"));
+}
+
+#[test]
+fn catalog_diagnostics_signature_failure_error_has_next_action() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let catalog = write_go_catalog_fixture(temp.path(), &archive, false);
+    fs::write(catalog.root_path.join("manifest.sig"), "bad-signature")
+        .expect("signature should be overwritten");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .arg("metadata")
+        .arg("verify-catalog")
+        .arg("go")
+        .arg("--catalog")
+        .arg(&catalog.root_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("catalog trust failure"))
+        .stderr(predicate::str::contains("catalog signature mismatch"))
+        .stderr(predicate::str::contains("next:"))
+        .stderr(predicate::str::contains(
+            "do not ignore catalog trust failures",
+        ));
+}
+
+#[test]
+fn catalog_diagnostics_expired_catalog_error_has_next_action() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let catalog = write_go_catalog_fixture(temp.path(), &archive, false);
+    expire_catalog_fixture(&catalog);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .arg("metadata")
+        .arg("verify-catalog")
+        .arg("go")
+        .arg("--catalog")
+        .arg(&catalog.root_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("catalog trust failure"))
+        .stderr(predicate::str::contains("expired at"))
+        .stderr(predicate::str::contains("next:"));
+}
+
+#[test]
+fn metadata_update_java_writes_temurin_fixture_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_java_archive(temp.path());
+    let temurin = write_java_temurin_release_metadata_fixture(temp.path(), &archive);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_JAVA_TEMURIN_RELEASE_METADATA", &temurin)
+        .arg("metadata")
+        .arg("update")
+        .arg("java")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("java temurin updated cache=fresh"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_JAVA_TEMURIN_RELEASE_METADATA")
+        .arg("list-remote")
+        .arg("java")
+        .arg("--distribution")
+        .arg("temurin")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("java 21.0.2 temurin"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn metadata_update_node_writes_official_fixture_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let official_index = write_node_official_index_fixture(temp.path());
+    let shasums_dir = write_node_official_shasums_fixtures(temp.path());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_NODE_OFFICIAL_RELEASE_INDEX", &official_index)
+        .env("DEVENV_NODE_OFFICIAL_SHASUMS_DIR", &shasums_dir)
+        .arg("metadata")
+        .arg("update")
+        .arg("node")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "node official updated cache=fresh",
+        ))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_NODE_OFFICIAL_RELEASE_INDEX")
+        .env_remove("DEVENV_NODE_OFFICIAL_SHASUMS_DIR")
+        .arg("list-remote")
+        .arg("node")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("node 20.11.1"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn node_catalog_metadata_update_writes_cache_and_status_digests() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_node_archive(temp.path());
+    let catalog = write_node_catalog_fixture(temp.path(), &archive, NodeCatalogFixtureMode::Normal);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("node")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "node official updated cache=fresh",
+        ))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("metadata")
+        .arg("status")
+        .arg("node")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("node official support=Direct"))
+        .stdout(predicate::str::contains("cache=fresh"))
+        .stdout(predicate::str::contains("cache_source=catalog"))
+        .stdout(predicate::str::contains("catalog_version=2026.05.22.1"))
+        .stdout(predicate::str::contains(format!(
+            "manifest_sha256={}",
+            catalog.manifest_sha256
+        )))
+        .stdout(predicate::str::contains(format!(
+            "payload_sha256={}",
+            catalog.payload_sha256
+        )))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn node_catalog_list_remote_offline_reads_catalog_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_node_archive(temp.path());
+    let catalog = write_node_catalog_fixture(temp.path(), &archive, NodeCatalogFixtureMode::Normal);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("node")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("list-remote")
+        .arg("node")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("node 20.12.0"))
+        .stdout(predicate::str::contains("node 20.11.1"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn node_catalog_install_dry_run_resolves_major_from_catalog_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_node_archive(temp.path());
+    let catalog = write_node_catalog_fixture(temp.path(), &archive, NodeCatalogFixtureMode::Normal);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("node")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("install")
+        .arg("node@20")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("requested node@20"))
+        .stdout(predicate::str::contains("resolved 20.12.0"))
+        .stdout(predicate::str::contains("provider official"))
+        .stdout(predicate::str::contains(archive.to_string_lossy()))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn node_catalog_missing_checksum_is_not_installable() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_node_archive(temp.path());
+    let catalog = write_node_catalog_fixture(
+        temp.path(),
+        &archive,
+        NodeCatalogFixtureMode::MissingCurrentChecksum,
+    );
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("node")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("install")
+        .arg("node@20.12.0")
+        .arg("--dry-run")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not provide an archive"));
+}
+
+#[test]
+fn node_catalog_env_fixture_override_wins_over_catalog_source() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let fixture_archive = write_fake_node_archive(temp.path());
+    let fixture_metadata = write_node_release_metadata_fixture(temp.path(), &fixture_archive);
+    let catalog_archive = write_fake_node_archive(temp.path());
+    let catalog = write_node_catalog_fixture(
+        temp.path(),
+        &catalog_archive,
+        NodeCatalogFixtureMode::Normal,
+    );
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_NODE_RELEASE_METADATA", &fixture_metadata)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("node")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_NODE_RELEASE_METADATA")
+        .arg("list-remote")
+        .arg("node")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("node 20.11.1"))
+        .stdout(predicate::str::contains("node 20.12.0").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn node_catalog_unsupported_platform_error_is_actionable() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_node_archive(temp.path());
+    let catalog = write_node_catalog_fixture(
+        temp.path(),
+        &archive,
+        NodeCatalogFixtureMode::UnsupportedCurrentPlatform,
+    );
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("node")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("install")
+        .arg("node@20.12.0")
+        .arg("--dry-run")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not provide an archive"))
+        .stderr(predicate::str::contains(current_platform_id_for_test()));
+}
+
+#[test]
+fn iac_catalog_metadata_update_writes_cache_and_status_digests() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let binary = write_fake_iac_binary(temp.path(), "terraform.catalog.fixture");
+    let catalog =
+        write_terraform_catalog_fixture(temp.path(), &binary, TerraformCatalogFixtureMode::Normal);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("terraform")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "terraform hashicorp updated cache=fresh",
+        ))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("metadata")
+        .arg("status")
+        .arg("terraform")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "terraform hashicorp support=Direct",
+        ))
+        .stdout(predicate::str::contains("cache=fresh"))
+        .stdout(predicate::str::contains("cache_source=catalog"))
+        .stdout(predicate::str::contains("catalog_version=2026.05.22.1"))
+        .stdout(predicate::str::contains(format!(
+            "manifest_sha256={}",
+            catalog.manifest_sha256
+        )))
+        .stdout(predicate::str::contains(format!(
+            "payload_sha256={}",
+            catalog.payload_sha256
+        )))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn iac_catalog_list_remote_offline_reads_catalog_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let binary = write_fake_iac_binary(temp.path(), "terraform.catalog.fixture");
+    let catalog =
+        write_terraform_catalog_fixture(temp.path(), &binary, TerraformCatalogFixtureMode::Normal);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("terraform")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("list-remote")
+        .arg("terraform")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("terraform 1.8.6"))
+        .stdout(predicate::str::contains("terraform 1.8.5"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn iac_catalog_install_dry_run_resolves_single_binary_from_catalog_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let binary = write_fake_iac_binary(temp.path(), "terraform.catalog.fixture");
+    let catalog =
+        write_terraform_catalog_fixture(temp.path(), &binary, TerraformCatalogFixtureMode::Normal);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("terraform")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("install")
+        .arg("terraform@1.8")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("requested terraform@1.8"))
+        .stdout(predicate::str::contains("resolved 1.8.6"))
+        .stdout(predicate::str::contains("provider hashicorp"))
+        .stdout(predicate::str::contains(binary.to_string_lossy()))
+        .stdout(predicate::str::contains("checksum sha256:"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn iac_catalog_missing_checksum_is_not_installable() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let binary = write_fake_iac_binary(temp.path(), "terraform.catalog.fixture");
+    let catalog = write_terraform_catalog_fixture(
+        temp.path(),
+        &binary,
+        TerraformCatalogFixtureMode::MissingCurrentChecksum,
+    );
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("terraform")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("install")
+        .arg("terraform@1.8.6")
+        .arg("--dry-run")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not provide a binary"));
+}
+
+#[test]
+fn iac_catalog_unsupported_platform_error_is_actionable() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let binary = write_fake_iac_binary(temp.path(), "terraform.catalog.fixture");
+    let catalog = write_terraform_catalog_fixture(
+        temp.path(),
+        &binary,
+        TerraformCatalogFixtureMode::UnsupportedCurrentPlatform,
+    );
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("terraform")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("install")
+        .arg("terraform@1.8.6")
+        .arg("--dry-run")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not provide a binary"))
+        .stderr(predicate::str::contains(current_platform_id_for_test()));
+}
+
+#[test]
+fn iac_catalog_env_fixture_override_wins_over_catalog_source() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let fixture_binary = write_fake_iac_binary(temp.path(), "terraform.fixture");
+    let fixture_metadata =
+        write_iac_release_metadata_fixture(temp.path(), &fixture_binary, "terraform");
+    let catalog_binary = write_fake_iac_binary(temp.path(), "terraform.catalog.fixture");
+    let catalog = write_terraform_catalog_fixture(
+        temp.path(),
+        &catalog_binary,
+        TerraformCatalogFixtureMode::Normal,
+    );
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_TERRAFORM_RELEASE_METADATA", &fixture_metadata)
+        .env("DEVENV_CATALOG_BASE_URL", &catalog.root_url)
+        .arg("metadata")
+        .arg("update")
+        .arg("terraform")
+        .arg("--source")
+        .arg("catalog")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_TERRAFORM_RELEASE_METADATA")
+        .arg("list-remote")
+        .arg("terraform")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("terraform 1.8.5"))
+        .stdout(predicate::str::contains("terraform 1.8.6").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn metadata_update_all_skips_missing_and_local_only_sources() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", temp.path().join("devenv-home"))
+        .env_remove("DEVENV_GO_RELEASE_METADATA")
+        .env_remove("DEVENV_GO_OFFICIAL_RELEASE_METADATA")
+        .arg("metadata")
+        .arg("update")
+        .arg("--all")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "go official skipped support=Direct reason=\"missing DEVENV_GO_RELEASE_METADATA",
+        ))
+        .stdout(predicate::str::contains(
+            "ruby local skipped support=LocalOnly",
+        ))
+        .stdout(predicate::str::contains("devenv add ruby <path>"))
+        .stdout(predicate::str::contains(
+            "php local skipped support=LocalOnly",
+        ))
+        .stdout(predicate::str::contains("devenv add php <path>"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn metadata_update_ruby_explains_local_only_support() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", temp.path().join("devenv-home"))
+        .arg("metadata")
+        .arg("update")
+        .arg("ruby")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "metadata update is not supported for ruby",
+        ))
+        .stderr(predicate::str::contains("LocalOnly"))
+        .stderr(predicate::str::contains("devenv add ruby <path>"));
+}
+
+#[test]
+fn install_ruby_reports_local_only_next_action() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("install")
+        .arg("ruby@3.3")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("support=LocalOnly"))
+        .stderr(predicate::str::contains("Ruby remote install is deferred"))
+        .stderr(predicate::str::contains("devenv add ruby <path>"));
+}
+
+#[test]
+fn install_php_reports_local_only_next_action() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("install")
+        .arg("php@8.3")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("support=LocalOnly"))
+        .stderr(predicate::str::contains("PHP remote install is deferred"))
+        .stderr(predicate::str::contains("devenv add php <path>"));
+}
+
+#[test]
+fn install_rust_reports_rustup_delegation() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("install")
+        .arg("rust@1.85")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("support=Delegated"))
+        .stderr(predicate::str::contains("rustup"))
+        .stderr(predicate::str::contains("RUSTUP_HOME"));
+}
+
+#[test]
+fn provider_list_reports_support_levels() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("provider")
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Providers"))
+        .stdout(predicate::str::contains("go official support=Direct"))
+        .stdout(predicate::str::contains("rust rustup support=Delegated"))
+        .stdout(predicate::str::contains("ruby local support=LocalOnly"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn provider_info_java_reports_selectors_and_checksum_policy() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("provider")
+        .arg("info")
+        .arg("java")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Provider info for java"))
+        .stdout(predicate::str::contains("provider temurin"))
+        .stdout(predicate::str::contains("checksum required"))
+        .stdout(predicate::str::contains(
+            "selectors distribution,image-type,package-type",
+        ))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn catalog_diagnostics_provider_info_go_reports_catalog_availability() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("provider")
+        .arg("info")
+        .arg("go")
+        .arg("official")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Provider info for go"))
+        .stdout(predicate::str::contains("provider official"))
+        .stdout(predicate::str::contains("support Direct"))
+        .stdout(predicate::str::contains("catalog_availability available"))
+        .stdout(predicate::str::contains("catalog_status experimental"))
+        .stdout(predicate::str::contains("DEVENV_CATALOG_BASE_URL"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn provider_info_rust_reports_rustup_delegation() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("provider")
+        .arg("info")
+        .arg("rust")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Provider info for rust"))
+        .stdout(predicate::str::contains("support Delegated"))
+        .stdout(predicate::str::contains(
+            "Rust installation is delegated to rustup",
+        ))
+        .stdout(predicate::str::contains("next_action"))
+        .stdout(predicate::str::contains("RUSTUP_HOME"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn provider_info_unknown_provider_id_is_actionable() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("provider")
+        .arg("info")
+        .arg("java")
+        .arg("zulu")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown provider `zulu` for java"))
+        .stderr(predicate::str::contains("supported providers: temurin"))
+        .stderr(predicate::str::contains("devenv provider info java"));
+}
+
+#[test]
+fn provider_info_unknown_tool_is_actionable() {
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("provider")
+        .arg("info")
+        .arg("zig")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unknown tool `zig` for provider metadata",
+        ))
+        .stderr(predicate::str::contains("supported provider tools:"))
+        .stderr(predicate::str::contains("devenv provider list"));
 }
 
 #[test]
@@ -1899,6 +3403,129 @@ fn install_go_from_fixture_archive_lists_and_activates_installed_runtime() {
 }
 
 #[test]
+fn install_go_dry_run_prints_resolved_plan_without_writing_install_or_download_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_go_archive(temp.path());
+    let metadata = write_go_release_metadata_fixture(temp.path(), &archive);
+    let devenv_home = temp.path().join("devenv-home");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_GO_RELEASE_METADATA", &metadata)
+        .arg("install")
+        .arg("go@1.22")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Install plan"))
+        .stdout(predicate::str::contains("tool go"))
+        .stdout(predicate::str::contains("requested go@1.22"))
+        .stdout(predicate::str::contains("resolved 1.22.5"))
+        .stdout(predicate::str::contains("provider official"))
+        .stdout(predicate::str::contains("url "))
+        .stdout(predicate::str::contains("checksum "))
+        .stdout(predicate::str::contains("install_path "))
+        .stdout(predicate::str::contains("dry_run true"))
+        .stderr(predicate::str::is_empty());
+
+    assert!(
+        !devenv_home.join("installs").exists(),
+        "dry-run must not write install store"
+    );
+    assert!(
+        !devenv_home.join("cache/downloads").exists(),
+        "dry-run must not write download cache"
+    );
+}
+
+#[test]
+fn install_java_dry_run_prints_temurin_plan_without_writing_install_or_download_cache() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_java_archive(temp.path());
+    let metadata = write_java_temurin_release_metadata_fixture(temp.path(), &archive);
+    let devenv_home = temp.path().join("devenv-home");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_JAVA_TEMURIN_RELEASE_METADATA", &metadata)
+        .arg("install")
+        .arg("java@21")
+        .arg("--dry-run")
+        .arg("--distribution")
+        .arg("temurin")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Install plan"))
+        .stdout(predicate::str::contains("tool java"))
+        .stdout(predicate::str::contains("requested java@21"))
+        .stdout(predicate::str::contains("resolved 21.0.2-temurin"))
+        .stdout(predicate::str::contains("provider temurin"))
+        .stdout(predicate::str::contains("checksum sha256:"))
+        .stdout(predicate::str::contains("install_path "))
+        .stdout(predicate::str::contains("dry_run true"))
+        .stderr(predicate::str::is_empty());
+
+    assert!(
+        !devenv_home.join("installs").exists(),
+        "dry-run must not write install store"
+    );
+    assert!(
+        !devenv_home.join("cache/downloads").exists(),
+        "dry-run must not write download cache"
+    );
+}
+
+#[test]
+fn install_go_from_cached_official_metadata_resolves_requested_minor() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let official = write_go_official_release_metadata_fixture(temp.path(), &archive);
+    let devenv_home = temp.path().join("devenv-home");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_GO_OFFICIAL_RELEASE_METADATA", &official)
+        .arg("metadata")
+        .arg("update")
+        .arg("go")
+        .assert()
+        .success();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_GO_RELEASE_METADATA")
+        .env_remove("DEVENV_GO_OFFICIAL_RELEASE_METADATA")
+        .arg("install")
+        .arg("go@1.23")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("installed go 1.23.4"))
+        .stdout(predicate::str::contains("installs/go/1.23.4"));
+
+    let install_metadata = fs::read_to_string(
+        devenv_home
+            .join("installs/go/1.23.4")
+            .join(current_platform_id_for_test())
+            .join("devenv-install.toml"),
+    )
+    .expect("install metadata should be readable");
+    assert!(install_metadata.contains("requested_spec = \"go@1.23\""));
+    assert!(install_metadata.contains("resolved_version = \"1.23.4\""));
+    assert!(install_metadata.contains("provider = \"official\""));
+    assert!(install_metadata.contains(
+        "checksum = \"sha256:8c788a765d2f6f52b0e300efd4d1495e305c1a558058d7c2e92b1793c2f315e9\""
+    ));
+}
+
+#[test]
 fn uninstall_removes_devenv_owned_install_directory() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let archive = write_fake_go_archive(temp.path());
@@ -1996,6 +3623,21 @@ fn install_flutter_from_fixture_archive_lists_and_activates_installed_sdk() {
         .stdout(predicate::str::contains("installed flutter 3.24.0"))
         .stdout(predicate::str::contains("installs/flutter/3.24.0"));
 
+    let install_metadata = fs::read_to_string(
+        devenv_home
+            .join("installs/flutter/3.24.0")
+            .join(current_platform_id_for_test())
+            .join("devenv-install.toml"),
+    )
+    .expect("install metadata should be readable");
+    assert!(install_metadata.contains("requested_spec = \"flutter@3.24\""));
+    assert!(install_metadata.contains("resolved_version = \"3.24.0\""));
+    assert!(install_metadata.contains("provider = \"stable\""));
+    assert!(install_metadata.contains("channel = \"stable\""));
+    assert!(install_metadata.contains(
+        "checksum = \"f5b1e0e36334ce2143fad93073cb8f333d53a54fcd7bee85133344a81e0da536\""
+    ));
+
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
         .current_dir(temp.path())
@@ -2057,6 +3699,15 @@ fn install_terraform_from_fixture_binary_uses_single_binary_pipeline() {
         .stdout(predicate::str::contains("terraform 1.8.5 installed"))
         .stdout(predicate::str::contains("installs/terraform/1.8.5"));
 
+    let install_metadata = fs::read_to_string(
+        devenv_home
+            .join("installs/terraform/1.8.5")
+            .join(current_platform_id_for_test())
+            .join("devenv-install.toml"),
+    )
+    .expect("install metadata should be readable");
+    assert!(install_metadata.contains("provider = \"hashicorp\""));
+
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
         .current_dir(temp.path())
@@ -2106,6 +3757,15 @@ fn install_opentofu_from_fixture_binary_uses_single_binary_pipeline() {
         .stdout(predicate::str::contains("opentofu 1.8.5 installed"))
         .stdout(predicate::str::contains("installs/opentofu/1.8.5"));
 
+    let install_metadata = fs::read_to_string(
+        devenv_home
+            .join("installs/opentofu/1.8.5")
+            .join(current_platform_id_for_test())
+            .join("devenv-install.toml"),
+    )
+    .expect("install metadata should be readable");
+    assert!(install_metadata.contains("provider = \"opentofu\""));
+
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
         .current_dir(temp.path())
@@ -2150,6 +3810,7 @@ fn install_node_from_fixture_archive_lists_and_activates_installed_runtime() {
     .expect("install metadata should be readable");
     assert!(install_metadata.contains("tool = \"node\""));
     assert!(install_metadata.contains("version = \"20.11.1\""));
+    assert!(install_metadata.contains("provider = \"official\""));
 
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
@@ -2307,6 +3968,7 @@ fn install_java_from_fixture_archive_lists_and_activates_installed_jdk() {
     )
     .expect("install metadata should be readable");
     assert!(install_metadata.contains("distribution = \"temurin\""));
+    assert!(install_metadata.contains("provider = \"temurin\""));
 
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
@@ -2467,6 +4129,16 @@ fn write_fake_go_archive(parent: &Path) -> PathBuf {
     archive
 }
 
+fn write_fake_go_archive_with_version(parent: &Path, version: &str) -> PathBuf {
+    let archive = parent.join(format!("go{version}.fixture.archive"));
+    fs::write(
+        &archive,
+        format!("VERSION\tgo{version}\nbin/go\nbin/gofmt\n"),
+    )
+    .expect("archive should be written");
+    archive
+}
+
 fn write_fake_flutter_archive(parent: &Path) -> PathBuf {
     let archive = parent.join("flutter-3.24.0.fixture.archive");
     fs::write(
@@ -2528,6 +4200,410 @@ fn write_go_release_metadata_fixture(parent: &Path, archive: &Path) -> PathBuf {
         34,
         "go-releases.toml",
     )
+}
+
+fn write_go_official_release_metadata_fixture(parent: &Path, archive: &Path) -> PathBuf {
+    let metadata = parent.join("go-official-releases.json");
+    let url = archive
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let (go_os, go_arch) = current_go_official_platform_for_test();
+    let extension = if go_os == "windows" { "zip" } else { "tar.gz" };
+    fs::write(
+        &metadata,
+        format!(
+            r#"
+[
+  {{
+    "version": "go1.23.4",
+    "stable": true,
+    "files": [
+      {{
+        "filename": "go1.23.4.{go_os}-{go_arch}.{extension}",
+        "os": "{go_os}",
+        "arch": "{go_arch}",
+        "version": "go1.23.4",
+        "kind": "archive",
+        "url": "{url}",
+        "sha256": "8c788a765d2f6f52b0e300efd4d1495e305c1a558058d7c2e92b1793c2f315e9",
+        "size": 34
+      }}
+    ]
+  }},
+  {{
+    "version": "go1.23.3",
+    "stable": false,
+    "files": []
+  }}
+]
+"#
+        ),
+    )
+    .expect("official release metadata should be written");
+    metadata
+}
+
+#[derive(Debug)]
+struct GoCatalogFixture {
+    root_path: PathBuf,
+    root_url: String,
+    manifest_sha256: String,
+    payload_sha256: String,
+}
+
+fn write_go_catalog_fixture(
+    parent: &Path,
+    archive: &Path,
+    corrupt_payload_sha: bool,
+) -> GoCatalogFixture {
+    let root = parent.join("catalog-v1");
+    let payload_path = root.join("tools/go/official/releases.json");
+    fs::create_dir_all(payload_path.parent().expect("payload parent should exist"))
+        .expect("catalog payload directory should be created");
+    let (go_os, go_arch) = current_go_official_platform_for_test();
+    let extension = if go_os == "windows" { "zip" } else { "tar.gz" };
+    let archive_url = archive
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let archive_bytes = fs::read(archive).expect("archive should be readable");
+    let archive_checksum = format!("sha256:{}", hex_sha256(&archive_bytes));
+    let archive_size = archive_bytes.len();
+    let payload = format!(
+        r#"{{
+  "schema_version": 1,
+  "tool": "go",
+  "provider": "official",
+  "releases": [
+    {{
+      "version": "go1.23.5",
+      "stable": true,
+      "yanked": true,
+      "yanked_reason": "test yanked release",
+      "artifacts": [
+        {{
+          "filename": "go1.23.5.{go_os}-{go_arch}.{extension}",
+          "os": "{go_os}",
+          "arch": "{go_arch}",
+          "kind": "archive",
+          "url": "{archive_url}",
+          "checksum": "{archive_checksum}",
+          "size": {archive_size}
+        }}
+      ]
+    }},
+    {{
+      "version": "go1.23.4",
+      "stable": true,
+      "artifacts": [
+        {{
+          "filename": "go1.23.4.{go_os}-{go_arch}.{extension}",
+          "os": "{go_os}",
+          "arch": "{go_arch}",
+          "kind": "archive",
+          "url": "{archive_url}",
+          "checksum": "{archive_checksum}",
+          "size": {archive_size}
+        }}
+      ]
+    }}
+  ]
+}}"#
+    );
+    fs::write(&payload_path, &payload).expect("catalog payload should be written");
+    let payload_sha256 = format!("sha256:{}", hex_sha256(payload.as_bytes()));
+    let manifest_payload_sha256 = if corrupt_payload_sha {
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned()
+    } else {
+        payload_sha256.clone()
+    };
+    let manifest = format!(
+        r#"{{
+  "schema_version": 1,
+  "catalog_id": "dev.devenv.catalog",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "catalog_version": "2026.05.22.1",
+  "min_devenv_version": "0.1.0",
+  "sequence": 1,
+  "entries": [
+    {{
+      "tool": "go",
+      "provider": "official",
+      "path": "tools/go/official/releases.json",
+      "sha256": "{manifest_payload_sha256}",
+      "payload_kind": "normalized-release-index",
+      "ttl_seconds": 86400
+    }}
+  ]
+}}"#
+    );
+    fs::write(root.join("manifest.json"), &manifest).expect("catalog manifest should be written");
+    let manifest_sha256 = format!("sha256:{}", hex_sha256(manifest.as_bytes()));
+    fs::write(root.join("manifest.sig"), &manifest_sha256)
+        .expect("catalog manifest signature should be written");
+
+    GoCatalogFixture {
+        root_path: root.clone(),
+        root_url: format!("file://{}", root.display()),
+        manifest_sha256,
+        payload_sha256,
+    }
+}
+
+fn expire_catalog_fixture(catalog: &GoCatalogFixture) {
+    let manifest_path = catalog.root_path.join("manifest.json");
+    let manifest = fs::read_to_string(&manifest_path).expect("manifest should be readable");
+    let expired = manifest.replace("2099-01-01T00:00:00Z", "2000-01-01T00:00:00Z");
+    fs::write(&manifest_path, &expired).expect("expired manifest should be written");
+    let manifest_sha256 = format!("sha256:{}", hex_sha256(expired.as_bytes()));
+    fs::write(catalog.root_path.join("manifest.sig"), manifest_sha256)
+        .expect("expired manifest signature should be written");
+}
+
+#[derive(Debug)]
+struct NodeCatalogFixture {
+    root_url: String,
+    manifest_sha256: String,
+    payload_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NodeCatalogFixtureMode {
+    Normal,
+    MissingCurrentChecksum,
+    UnsupportedCurrentPlatform,
+}
+
+fn write_node_catalog_fixture(
+    parent: &Path,
+    archive: &Path,
+    mode: NodeCatalogFixtureMode,
+) -> NodeCatalogFixture {
+    let root = parent.join("catalog-node-v1");
+    let payload_path = root.join("tools/node/official/releases.json");
+    fs::create_dir_all(payload_path.parent().expect("payload parent should exist"))
+        .expect("catalog payload directory should be created");
+    let (current_os, current_arch, current_extension) = current_node_catalog_platform_for_test();
+    let (release_os, release_arch, release_extension) = match mode {
+        NodeCatalogFixtureMode::UnsupportedCurrentPlatform => {
+            alternate_node_catalog_platform_for_test()
+        }
+        NodeCatalogFixtureMode::Normal | NodeCatalogFixtureMode::MissingCurrentChecksum => {
+            (current_os, current_arch, current_extension)
+        }
+    };
+    let archive_url = archive
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let archive_bytes = fs::read(archive).expect("archive should be readable");
+    let archive_checksum = format!("sha256:{}", hex_sha256(&archive_bytes));
+    let archive_size = archive_bytes.len();
+    let latest_checksum_field = match mode {
+        NodeCatalogFixtureMode::MissingCurrentChecksum => String::new(),
+        NodeCatalogFixtureMode::Normal | NodeCatalogFixtureMode::UnsupportedCurrentPlatform => {
+            format!(
+                r#",
+          "checksum": "{archive_checksum}""#
+            )
+        }
+    };
+    let payload = format!(
+        r#"{{
+  "schema_version": 1,
+  "tool": "node",
+  "provider": "official",
+  "releases": [
+    {{
+      "version": "v20.12.0",
+      "stable": true,
+      "artifacts": [
+        {{
+          "filename": "node-v20.12.0-{release_os}-{release_arch}.{release_extension}",
+          "os": "{release_os}",
+          "arch": "{release_arch}",
+          "kind": "archive",
+          "url": "{archive_url}",
+          "size": {archive_size}{latest_checksum_field}
+        }}
+      ]
+    }},
+    {{
+      "version": "v20.11.1",
+      "stable": true,
+      "artifacts": [
+        {{
+          "filename": "node-v20.11.1-{current_os}-{current_arch}.{current_extension}",
+          "os": "{current_os}",
+          "arch": "{current_arch}",
+          "kind": "archive",
+          "url": "{archive_url}",
+          "checksum": "{archive_checksum}",
+          "size": {archive_size}
+        }}
+      ]
+    }}
+  ]
+}}"#
+    );
+    fs::write(&payload_path, &payload).expect("catalog payload should be written");
+    let payload_sha256 = format!("sha256:{}", hex_sha256(payload.as_bytes()));
+    let manifest = format!(
+        r#"{{
+  "schema_version": 1,
+  "catalog_id": "dev.devenv.catalog",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "catalog_version": "2026.05.22.1",
+  "min_devenv_version": "0.1.0",
+  "sequence": 1,
+  "entries": [
+    {{
+      "tool": "node",
+      "provider": "official",
+      "path": "tools/node/official/releases.json",
+      "sha256": "{payload_sha256}",
+      "payload_kind": "normalized-release-index",
+      "ttl_seconds": 86400
+    }}
+  ]
+}}"#
+    );
+    fs::write(root.join("manifest.json"), &manifest).expect("catalog manifest should be written");
+    let manifest_sha256 = format!("sha256:{}", hex_sha256(manifest.as_bytes()));
+    fs::write(root.join("manifest.sig"), &manifest_sha256)
+        .expect("catalog manifest signature should be written");
+
+    NodeCatalogFixture {
+        root_url: format!("file://{}", root.display()),
+        manifest_sha256,
+        payload_sha256,
+    }
+}
+
+#[derive(Debug)]
+struct TerraformCatalogFixture {
+    root_url: String,
+    manifest_sha256: String,
+    payload_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerraformCatalogFixtureMode {
+    Normal,
+    MissingCurrentChecksum,
+    UnsupportedCurrentPlatform,
+}
+
+fn write_terraform_catalog_fixture(
+    parent: &Path,
+    binary: &Path,
+    mode: TerraformCatalogFixtureMode,
+) -> TerraformCatalogFixture {
+    let root = parent.join("catalog-terraform-v1");
+    let payload_path = root.join("tools/terraform/hashicorp/releases.json");
+    fs::create_dir_all(payload_path.parent().expect("payload parent should exist"))
+        .expect("catalog payload directory should be created");
+    let (current_os, current_arch, current_filename) = current_iac_catalog_platform_for_test();
+    let (release_os, release_arch, release_filename) = match mode {
+        TerraformCatalogFixtureMode::UnsupportedCurrentPlatform => {
+            alternate_iac_catalog_platform_for_test()
+        }
+        TerraformCatalogFixtureMode::Normal
+        | TerraformCatalogFixtureMode::MissingCurrentChecksum => {
+            (current_os, current_arch, current_filename)
+        }
+    };
+    let binary_url = binary
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let binary_bytes = fs::read(binary).expect("binary should be readable");
+    let binary_checksum = format!("sha256:{}", hex_sha256(&binary_bytes));
+    let binary_size = binary_bytes.len();
+    let latest_checksum_field = match mode {
+        TerraformCatalogFixtureMode::MissingCurrentChecksum => String::new(),
+        TerraformCatalogFixtureMode::Normal
+        | TerraformCatalogFixtureMode::UnsupportedCurrentPlatform => {
+            format!(
+                r#",
+          "checksum": "{binary_checksum}""#
+            )
+        }
+    };
+    let payload = format!(
+        r#"{{
+  "schema_version": 1,
+  "tool": "terraform",
+  "provider": "hashicorp",
+  "releases": [
+    {{
+      "version": "1.8.6",
+      "stable": true,
+      "artifacts": [
+        {{
+          "filename": "{release_filename}",
+          "os": "{release_os}",
+          "arch": "{release_arch}",
+          "kind": "single-binary",
+          "url": "{binary_url}",
+          "size": {binary_size}{latest_checksum_field}
+        }}
+      ]
+    }},
+    {{
+      "version": "1.8.5",
+      "stable": true,
+      "artifacts": [
+        {{
+          "filename": "{current_filename}",
+          "os": "{current_os}",
+          "arch": "{current_arch}",
+          "kind": "single-binary",
+          "url": "{binary_url}",
+          "checksum": "{binary_checksum}",
+          "size": {binary_size}
+        }}
+      ]
+    }}
+  ]
+}}"#
+    );
+    fs::write(&payload_path, &payload).expect("catalog payload should be written");
+    let payload_sha256 = format!("sha256:{}", hex_sha256(payload.as_bytes()));
+    let manifest = format!(
+        r#"{{
+  "schema_version": 1,
+  "catalog_id": "dev.devenv.catalog",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "catalog_version": "2026.05.22.1",
+  "min_devenv_version": "0.1.0",
+  "sequence": 1,
+  "entries": [
+    {{
+      "tool": "terraform",
+      "provider": "hashicorp",
+      "path": "tools/terraform/hashicorp/releases.json",
+      "sha256": "{payload_sha256}",
+      "payload_kind": "normalized-release-index",
+      "ttl_seconds": 86400
+    }}
+  ]
+}}"#
+    );
+    fs::write(root.join("manifest.json"), &manifest).expect("catalog manifest should be written");
+    let manifest_sha256 = format!("sha256:{}", hex_sha256(manifest.as_bytes()));
+    fs::write(root.join("manifest.sig"), &manifest_sha256)
+        .expect("catalog manifest signature should be written");
+
+    TerraformCatalogFixture {
+        root_url: format!("file://{}", root.display()),
+        manifest_sha256,
+        payload_sha256,
+    }
 }
 
 fn write_nested_go_release_metadata_fixture(parent: &Path, archive: &Path) -> PathBuf {
@@ -2623,6 +4699,8 @@ os = "macos"
 arch = "arm64"
 kind = "archive"
 url = "{url}"
+sha256 = "f5b1e0e36334ce2143fad93073cb8f333d53a54fcd7bee85133344a81e0da536"
+size = 68
 
 [[release.file]]
 filename = "flutter_macos_x64_3.24.0-stable.zip"
@@ -2630,6 +4708,8 @@ os = "macos"
 arch = "x64"
 kind = "archive"
 url = "{url}"
+sha256 = "f5b1e0e36334ce2143fad93073cb8f333d53a54fcd7bee85133344a81e0da536"
+size = 68
 
 [[release.file]]
 filename = "flutter_linux_x64_3.24.0-stable.tar.gz"
@@ -2637,6 +4717,8 @@ os = "linux"
 arch = "x64"
 kind = "archive"
 url = "{url}"
+sha256 = "f5b1e0e36334ce2143fad93073cb8f333d53a54fcd7bee85133344a81e0da536"
+size = 68
 
 [[release.file]]
 filename = "flutter_linux_arm64_3.24.0-stable.tar.gz"
@@ -2644,6 +4726,8 @@ os = "linux"
 arch = "arm64"
 kind = "archive"
 url = "{url}"
+sha256 = "f5b1e0e36334ce2143fad93073cb8f333d53a54fcd7bee85133344a81e0da536"
+size = 68
 
 [[release.file]]
 filename = "flutter_windows_x64_3.24.0-stable.zip"
@@ -2651,6 +4735,8 @@ os = "windows"
 arch = "x64"
 kind = "archive"
 url = "{url}"
+sha256 = "f5b1e0e36334ce2143fad93073cb8f333d53a54fcd7bee85133344a81e0da536"
+size = 68
 
 [[release.file]]
 filename = "flutter_windows_arm64_3.24.0-stable.zip"
@@ -2658,6 +4744,8 @@ os = "windows"
 arch = "arm64"
 kind = "archive"
 url = "{url}"
+sha256 = "f5b1e0e36334ce2143fad93073cb8f333d53a54fcd7bee85133344a81e0da536"
+size = 68
 "#
         ),
     )
@@ -2725,6 +4813,196 @@ url = "{url}"
     )
     .expect("release metadata should be written");
     metadata
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IacFixtureTool {
+    Terraform,
+    OpenTofu,
+}
+
+fn serve_iac_official_metadata(tool: IacFixtureTool) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+    let address = listener.local_addr().expect("server address should exist");
+    thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("request should arrive");
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).expect("request should read");
+            let request = String::from_utf8_lossy(&request[..read]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let (status, reason, body) = match (tool, path) {
+                (IacFixtureTool::Terraform, "/index.json") => {
+                    (200, "OK", terraform_official_index_fixture_body())
+                }
+                (IacFixtureTool::Terraform, "/1.8.5/terraform_1.8.5_SHA256SUMS") => {
+                    (200, "OK", terraform_official_sha256s_185())
+                }
+                (IacFixtureTool::OpenTofu, "/releases.json") => {
+                    (200, "OK", opentofu_official_releases_fixture_body())
+                }
+                (IacFixtureTool::OpenTofu, "/v1.8.5/tofu_1.8.5_SHA256SUMS") => {
+                    (200, "OK", opentofu_official_sha256s_185())
+                }
+                _ => (404, "Not Found", "not found"),
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("response should write");
+        }
+    });
+    format!("http://{address}")
+}
+
+fn terraform_official_index_fixture_body() -> &'static str {
+    r#"
+{
+  "versions": {
+    "1.8.5": {
+      "builds": [
+        {"os": "darwin", "arch": "arm64", "filename": "terraform_1.8.5_darwin_arm64.zip", "url": "https://example.test/terraform_1.8.5_darwin_arm64.zip"},
+        {"os": "linux", "arch": "amd64", "filename": "terraform_1.8.5_linux_amd64.zip", "url": "https://example.test/terraform_1.8.5_linux_amd64.zip"},
+        {"os": "windows", "arch": "amd64", "filename": "terraform_1.8.5_windows_amd64.zip", "url": "https://example.test/terraform_1.8.5_windows_amd64.zip"}
+      ]
+    }
+  }
+}
+"#
+}
+
+fn opentofu_official_releases_fixture_body() -> &'static str {
+    r#"
+[
+  {
+    "tag_name": "v1.8.5",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {"name": "tofu_1.8.5_darwin_arm64.zip", "browser_download_url": "https://example.test/tofu_1.8.5_darwin_arm64.zip"},
+      {"name": "tofu_1.8.5_linux_amd64.zip", "browser_download_url": "https://example.test/tofu_1.8.5_linux_amd64.zip"},
+      {"name": "tofu_1.8.5_windows_amd64.zip", "browser_download_url": "https://example.test/tofu_1.8.5_windows_amd64.zip"},
+      {"name": "tofu_1.8.5_SHA256SUMS", "browser_download_url": "https://example.test/tofu_1.8.5_SHA256SUMS"}
+    ]
+  }
+]
+"#
+}
+
+fn terraform_official_sha256s_185() -> &'static str {
+    r#"
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  terraform_1.8.5_darwin_arm64.zip
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  terraform_1.8.5_linux_amd64.zip
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee  terraform_1.8.5_windows_amd64.zip
+"#
+}
+
+fn opentofu_official_sha256s_185() -> &'static str {
+    r#"
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  tofu_1.8.5_darwin_arm64.zip
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  tofu_1.8.5_linux_amd64.zip
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee  tofu_1.8.5_windows_amd64.zip
+"#
+}
+
+fn serve_flutter_official_metadata() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+    let address = listener.local_addr().expect("server address should exist");
+    thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("request should arrive");
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).expect("request should read");
+            let request = String::from_utf8_lossy(&request[..read]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let (status, reason, body) = match path {
+                "/releases_macos.json" => (200, "OK", flutter_official_macos_fixture_body()),
+                "/releases_linux.json" => (200, "OK", flutter_official_linux_fixture_body()),
+                "/releases_windows.json" => (200, "OK", flutter_official_windows_fixture_body()),
+                _ => (404, "Not Found", "not found"),
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("response should write");
+        }
+    });
+    format!("http://{address}")
+}
+
+fn flutter_official_macos_fixture_body() -> &'static str {
+    r#"
+{
+  "base_url": "https://storage.googleapis.com/flutter_infra_release/releases",
+  "current_release": {"stable": "macos-arm64"},
+  "releases": [
+    {
+      "hash": "macos-arm64",
+      "channel": "stable",
+      "version": "3.24.0",
+      "dart_sdk_arch": "arm64",
+      "archive": "stable/macos/flutter_macos_arm64_3.24.0-stable.zip",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "hash": "macos-beta",
+      "channel": "beta",
+      "version": "3.25.0-0.1.pre",
+      "dart_sdk_arch": "arm64",
+      "archive": "beta/macos/flutter_macos_arm64_3.25.0-0.1.pre-beta.zip",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}
+"#
+}
+
+fn flutter_official_linux_fixture_body() -> &'static str {
+    r#"
+{
+  "base_url": "https://storage.googleapis.com/flutter_infra_release/releases",
+  "current_release": {"stable": "linux-x64"},
+  "releases": [
+    {
+      "hash": "linux-x64",
+      "channel": "stable",
+      "version": "3.24.0",
+      "archive": "stable/linux/flutter_linux_3.24.0-stable.tar.xz",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}
+"#
+}
+
+fn flutter_official_windows_fixture_body() -> &'static str {
+    r#"
+{
+  "base_url": "https://storage.googleapis.com/flutter_infra_release/releases",
+  "current_release": {"stable": "windows-x64"},
+  "releases": [
+    {
+      "hash": "windows-x64",
+      "channel": "stable",
+      "version": "3.24.0",
+      "archive": "stable/windows/flutter_windows_3.24.0-stable.zip",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ]
+}
+"#
 }
 
 fn write_node_release_metadata_fixture(parent: &Path, archive: &Path) -> PathBuf {
@@ -2799,6 +5077,103 @@ size = 125
     )
     .expect("release metadata should be written");
     metadata
+}
+
+fn write_node_official_index_fixture(parent: &Path) -> PathBuf {
+    let metadata = parent.join("node-official-index.json");
+    fs::write(&metadata, node_official_index_fixture_body())
+        .expect("Node official index fixture should be written");
+    metadata
+}
+
+fn write_node_official_shasums_fixtures(parent: &Path) -> PathBuf {
+    let root = parent.join("node-shasums");
+    let v20 = root.join("v20.11.1");
+    let v21 = root.join("v21.2.0");
+    fs::create_dir_all(&v20).expect("v20 shasums dir should be created");
+    fs::create_dir_all(&v21).expect("v21 shasums dir should be created");
+    fs::write(v20.join("SHASUMS256.txt"), node_official_shasums_20())
+        .expect("v20 shasums should be written");
+    fs::write(v21.join("SHASUMS256.txt"), node_official_shasums_21())
+        .expect("v21 shasums should be written");
+    root
+}
+
+fn node_official_index_fixture_body() -> &'static str {
+    r#"
+[
+  {
+    "version": "v20.11.1",
+    "date": "2024-02-13",
+    "files": [
+      "osx-arm64-tar",
+      "osx-x64-tar",
+      "linux-x64",
+      "linux-arm64",
+      "win-x64-zip",
+      "win-arm64-zip",
+      "headers"
+    ],
+    "lts": "Iron"
+  },
+  {
+    "version": "v21.2.0",
+    "date": "2023-11-14",
+    "files": [
+      "linux-x64"
+    ],
+    "lts": false
+  }
+]
+"#
+}
+
+fn node_official_shasums_20() -> &'static str {
+    r#"
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  node-v20.11.1-darwin-arm64.tar.gz
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  node-v20.11.1-darwin-x64.tar.gz
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  node-v20.11.1-linux-x64.tar.gz
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  node-v20.11.1-linux-arm64.tar.gz
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee  node-v20.11.1-win-x64.zip
+ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  node-v20.11.1-win-arm64.zip
+"#
+}
+
+fn node_official_shasums_21() -> &'static str {
+    r#"
+9999999999999999999999999999999999999999999999999999999999999999  node-v21.2.0-linux-x64.tar.gz
+"#
+}
+
+fn serve_node_official_metadata() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+    let address = listener.local_addr().expect("server address should exist");
+    thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("request should arrive");
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).expect("request should read");
+            let request = String::from_utf8_lossy(&request[..read]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let (status, reason, body) = match path {
+                "/index.json" => (200, "OK", node_official_index_fixture_body()),
+                "/v20.11.1/SHASUMS256.txt" => (200, "OK", node_official_shasums_20()),
+                "/v21.2.0/SHASUMS256.txt" => (200, "OK", node_official_shasums_21()),
+                _ => (404, "Not Found", "not found"),
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("response should write");
+        }
+    });
+    format!("http://{address}")
 }
 
 fn write_python_release_metadata_fixture(parent: &Path, archive: &Path) -> PathBuf {
@@ -2966,6 +5341,58 @@ size = 50
     metadata
 }
 
+fn write_java_temurin_release_metadata_fixture(parent: &Path, archive: &Path) -> PathBuf {
+    let metadata = parent.join("java-temurin-releases.json");
+    let url = archive
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let (api_os, api_arch, filename_os, filename_arch, extension) =
+        current_temurin_platform_for_test();
+    fs::write(
+        &metadata,
+        format!(
+            r#"
+[
+  {{
+    "release_name": "jdk-21.0.2+13",
+    "release_type": "ga",
+    "version_data": {{
+      "major": 21,
+      "openjdk_version": "21.0.2+13",
+      "semver": "21.0.2+13"
+    }},
+    "binaries": [
+      {{
+        "architecture": "{api_arch}",
+        "os": "{api_os}",
+        "image_type": "jdk",
+        "package": {{
+          "name": "OpenJDK21U-jdk_{filename_arch}_{filename_os}_hotspot_21.0.2_13.{extension}",
+          "link": "{url}",
+          "checksum": "c3718be02942e7077e764bc77d2775235613c9a59935ed767b3ca7448dfde068",
+          "size": 50
+        }}
+      }}
+    ]
+  }},
+  {{
+    "release_name": "jdk-21.0.1+12",
+    "release_type": "ga",
+    "version_data": {{
+      "major": 21,
+      "openjdk_version": "21.0.1+12"
+    }},
+    "binaries": []
+  }}
+]
+"#
+        ),
+    )
+    .expect("Temurin release metadata should be written");
+    metadata
+}
+
 fn find_single_install_root(devenv_home: &Path, tool: &str, version: &str) -> PathBuf {
     let version_dir = devenv_home.join("installs").join(tool).join(version);
     let entries = fs::read_dir(&version_dir)
@@ -3001,4 +5428,103 @@ fn current_platform_id_for_test() -> &'static str {
         ("windows", "x64") => "windows-x64",
         _ => unreachable!("test platform should be mapped"),
     }
+}
+
+fn current_go_official_platform_for_test() -> (&'static str, &'static str) {
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "amd64"
+    };
+
+    (os, arch)
+}
+
+fn current_node_catalog_platform_for_test() -> (&'static str, &'static str, &'static str) {
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "win"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    let extension = if os == "win" { "zip" } else { "tar.gz" };
+
+    (os, arch, extension)
+}
+
+fn alternate_node_catalog_platform_for_test() -> (&'static str, &'static str, &'static str) {
+    let (current_os, current_arch, _) = current_node_catalog_platform_for_test();
+    if current_os == "linux" && current_arch == "x64" {
+        ("darwin", "arm64", "tar.gz")
+    } else {
+        ("linux", "x64", "tar.gz")
+    }
+}
+
+fn current_iac_catalog_platform_for_test() -> (&'static str, &'static str, &'static str) {
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "amd64"
+    };
+    let filename = if os == "windows" {
+        "terraform.exe"
+    } else {
+        "terraform"
+    };
+
+    (os, arch, filename)
+}
+
+fn alternate_iac_catalog_platform_for_test() -> (&'static str, &'static str, &'static str) {
+    let (current_os, current_arch, _) = current_iac_catalog_platform_for_test();
+    if current_os == "linux" && current_arch == "amd64" {
+        ("darwin", "arm64", "terraform")
+    } else {
+        ("linux", "amd64", "terraform")
+    }
+}
+
+fn current_temurin_platform_for_test() -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    let (api_os, filename_os) = if cfg!(target_os = "macos") {
+        ("mac", "mac")
+    } else if cfg!(target_os = "windows") {
+        ("windows", "windows")
+    } else {
+        ("linux", "linux")
+    };
+    let (api_arch, filename_arch) = if cfg!(target_arch = "aarch64") {
+        ("aarch64", "aarch64")
+    } else {
+        ("x64", "x64")
+    };
+    let extension = if api_os == "windows" { "zip" } else { "tar.gz" };
+
+    (api_os, api_arch, filename_os, filename_arch, extension)
 }

@@ -4,6 +4,7 @@ pub mod iac;
 pub mod java;
 pub mod node;
 pub mod php;
+pub mod providers;
 pub mod python;
 pub mod ruby;
 pub mod rust;
@@ -15,40 +16,51 @@ use devenv_core::{
     VersionScheme,
 };
 pub use flutter::{
-    FlutterArtifactResolver, FlutterInstalledRuntimeValidator, FlutterRelease, FlutterReleaseFile,
-    FlutterReleaseMetadata, FlutterReleaseVersionSource, FlutterRuntime, FlutterRuntimeDiscovery,
-    FlutterRuntimeSource, FlutterToolAdapter, FlutterVersionMatcher, match_flutter_runtime,
-    match_flutter_version, normalize_flutter_version, validate_flutter_sdk_home,
+    FLUTTER_OFFICIAL_BASE_URL, FLUTTER_OFFICIAL_LINUX_RELEASES_URL,
+    FLUTTER_OFFICIAL_MACOS_RELEASES_URL, FLUTTER_OFFICIAL_WINDOWS_RELEASES_URL,
+    FlutterArtifactResolver, FlutterInstalledRuntimeValidator, FlutterOfficialReleaseMetadata,
+    FlutterRelease, FlutterReleaseFile, FlutterReleaseMetadata, FlutterReleaseVersionSource,
+    FlutterRuntime, FlutterRuntimeDiscovery, FlutterRuntimeSource, FlutterToolAdapter,
+    FlutterVersionMatcher, match_flutter_runtime, match_flutter_version, normalize_flutter_version,
+    validate_flutter_sdk_home,
 };
 pub use go::{
-    GoArtifactResolver, GoInstalledRuntimeValidator, GoRelease, GoReleaseFile, GoReleaseMetadata,
-    GoReleaseVersionSource, GoRuntime, GoRuntimeDiscovery, GoRuntimeSource, GoToolAdapter,
+    GO_OFFICIAL_METADATA_URL, GoArtifactResolver, GoCatalogReleaseMetadata,
+    GoInstalledRuntimeValidator, GoOfficialReleaseMetadata, GoRelease, GoReleaseFile,
+    GoReleaseMetadata, GoReleaseVersionSource, GoRemoteArtifactResolver,
+    GoRemoteReleaseVersionSource, GoRuntime, GoRuntimeDiscovery, GoRuntimeSource, GoToolAdapter,
     GoVersionMatcher, match_go_runtime, match_go_version, normalize_go_version,
     validate_go_sdk_home,
 };
 pub use iac::{
-    IacArtifactResolver, IacRelease, IacReleaseFile, IacReleaseMetadata, IacReleaseVersionSource,
-    IacRuntime, IacRuntimeDiscovery, IacRuntimeSource, IacTool, IacVersionMatcher,
-    OpenTofuInstalledRuntimeValidator, OpenTofuToolAdapter, TerraformInstalledRuntimeValidator,
+    IacArtifactResolver, IacCatalogReleaseMetadata, IacOfficialReleaseMetadata, IacRelease,
+    IacReleaseFile, IacReleaseMetadata, IacReleaseVersionSource, IacRuntime, IacRuntimeDiscovery,
+    IacRuntimeSource, IacTool, IacVersionMatcher, OPENTOFU_OFFICIAL_BASE_URL,
+    OPENTOFU_OFFICIAL_RELEASES_URL, OpenTofuInstalledRuntimeValidator, OpenTofuToolAdapter,
+    TERRAFORM_OFFICIAL_BASE_URL, TERRAFORM_OFFICIAL_INDEX_URL, TerraformInstalledRuntimeValidator,
     TerraformToolAdapter, match_iac_runtime, match_iac_version, normalize_iac_version,
-    validate_iac_tool_home,
+    parse_iac_sha256s, validate_iac_tool_home,
 };
 pub use java::{
-    JavaArtifactResolver, JavaDistribution, JavaInstalledRuntimeValidator, JavaRelease,
-    JavaReleaseFile, JavaReleaseMetadata, JavaReleaseVersionSource, JavaRuntime,
-    JavaRuntimeDiscovery, JavaRuntimeSource, JavaToolAdapter, JavaVersionMatcher,
-    match_java_runtime, match_java_version, normalize_java_version, validate_jdk_home,
+    JAVA_TEMURIN_METADATA_URL_HINT, JavaArtifactResolver, JavaDistribution,
+    JavaInstalledRuntimeValidator, JavaRelease, JavaReleaseFile, JavaReleaseMetadata,
+    JavaReleaseVersionSource, JavaRuntime, JavaRuntimeDiscovery, JavaRuntimeSource,
+    JavaTemurinReleaseMetadata, JavaToolAdapter, JavaVersionMatcher, match_java_runtime,
+    match_java_version, normalize_java_version, validate_jdk_home,
 };
 pub use node::{
-    NodeArtifactResolver, NodeInstalledRuntimeValidator, NodeRelease, NodeReleaseFile,
-    NodeReleaseMetadata, NodeReleaseVersionSource, NodeRuntime, NodeRuntimeDiscovery,
-    NodeRuntimeSource, NodeToolAdapter, NodeVersionMatcher, match_node_runtime, match_node_version,
-    normalize_node_version, validate_node_home,
+    NODE_OFFICIAL_DIST_BASE_URL, NODE_OFFICIAL_INDEX_URL, NodeArtifactResolver,
+    NodeCatalogReleaseMetadata, NodeInstalledRuntimeValidator, NodeOfficialReleaseMetadata,
+    NodeRelease, NodeReleaseFile, NodeReleaseMetadata, NodeReleaseVersionSource, NodeRuntime,
+    NodeRuntimeDiscovery, NodeRuntimeSource, NodeToolAdapter, NodeVersionMatcher,
+    match_node_runtime, match_node_version, node_official_required_shasums_versions,
+    normalize_node_version, parse_node_shasums256, validate_node_home,
 };
 pub use php::{
     PhpRuntime, PhpRuntimeDiscovery, PhpRuntimeSource, PhpToolAdapter, PhpVersionMatcher,
     match_php_runtime, match_php_version, normalize_php_version, validate_php_home,
 };
+pub use providers::{builtin_provider_capabilities, builtin_provider_registry};
 pub use python::{
     PythonArtifactResolver, PythonImplementation, PythonInstalledRuntimeValidator, PythonRelease,
     PythonReleaseFile, PythonReleaseMetadata, PythonReleaseVersionSource, PythonRuntime,

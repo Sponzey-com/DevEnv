@@ -48,6 +48,108 @@ devenv 0.1.0 (target=aarch64-apple-darwin, profile=release, git=<sha>)
 
 Build timestamps are intentionally omitted so artifacts stay reproducible enough for early users.
 
+## Network, Cache, And Offline Behavior
+
+DevEnv separates metadata refresh from runtime artifact download.
+
+- `devenv metadata update <tool>` and `devenv list-remote <tool> --refresh` fetch small provider metadata and write `$DEVENV_HOME/cache/metadata/<tool>/<provider>/metadata.json`.
+- `devenv list-remote <tool> --offline` reads fixture overrides or the metadata cache and does not use the network.
+- `devenv install <tool>@<version>` downloads the selected runtime artifact only after metadata resolution.
+- downloaded artifacts are cached under `$DEVENV_HOME/cache/downloads`.
+
+Checksums are part of the Direct provider contract. A checksum-bearing artifact is promoted into the download cache only after verification. Providers without usable checksums should not be enabled for default Direct install.
+
+## Metadata Catalog Distribution
+
+DevEnv also has an experimental GitHub metadata catalog distribution path. The catalog is metadata only: it contains manifest files and normalized provider payloads with artifact URLs, checksums, platform mappings, and selector metadata. It must not contain Go, Java, Node.js, Flutter, Terraform, OpenTofu, or other runtime artifact archives.
+
+Catalog release assets are separate from DevEnv binary release artifacts. Candidate metadata release assets are:
+
+```text
+devenv-catalog-v1-<catalog_version>.tar.gz
+manifest.json
+manifest.sig
+manifest.cert
+SHA256SUMS
+```
+
+Trust policy:
+
+- The catalog manifest must be verified against a pinned trust root before payloads are written to the metadata cache.
+- Manifest signature verification is the authenticity check. Adjacent checksum files are useful transfer diagnostics, but they do not replace signature verification.
+- Manifest entries bind each normalized payload through `sha256:<hex>` payload checksums.
+- Catalog trust failure is different from catalog network failure. Trust failures must not silently fall back to official provider refresh.
+- Mutable raw branch URLs are not default distribution sources. Default catalog distribution should use immutable GitHub Release assets or immutable tag-based URLs.
+
+Catalog rollout:
+
+- Experimental: users opt in with `--source catalog`, explicit catalog file/base URL, or `DEVENV_ENABLE_CATALOG=1`.
+- Beta: selected providers may include catalog in `--source auto` after smoke tests and signature verification are stable.
+- Stable: catalog can become the preferred metadata source only after publishing, signing, mirror, rollback, and support procedures have been exercised.
+
+For organization mirrors and air-gapped environments, prefer source overrides rather than project-specific URLs:
+
+- verified catalog release archives such as `devenv-catalog-v1-<catalog_version>.tar.gz`, extracted to a file or HTTP mirror;
+- normalized fixture variables such as `DEVENV_GO_RELEASE_METADATA`;
+- official-payload fixtures such as `DEVENV_GO_OFFICIAL_RELEASE_METADATA`;
+- provider mirror base URLs such as `DEVENV_NODE_OFFICIAL_BASE_URL`, `DEVENV_FLUTTER_OFFICIAL_BASE_URL`, `DEVENV_TERRAFORM_OFFICIAL_BASE_URL`, and `DEVENV_OPENTOFU_OFFICIAL_BASE_URL`.
+
+Project files should record versions. Provider and mirror configuration should remain user/global operational configuration.
+
+Catalog mirror example:
+
+```sh
+# connected staging machine
+devenv metadata verify-catalog go --catalog /staging/devenv-metadata/v1 --source file
+
+# air-gapped machine
+export DEVENV_ENABLE_CATALOG=1
+export DEVENV_CATALOG_BASE_URL=file:///mirror/devenv-metadata/v1
+devenv metadata update go --source catalog
+devenv list-remote go --offline
+```
+
+## Opt-In Network Smoke
+
+The default test suite is offline. Real provider smoke checks are intentionally opt-in:
+
+```sh
+scripts/network-smoke.sh --help
+DEVENV_NETWORK_SMOKE=1 scripts/network-smoke.sh
+```
+
+The default network smoke refreshes Go official metadata and verifies that `list-remote go --offline` can read the refreshed cache. It does not download a runtime artifact.
+
+An actual artifact download smoke is separated behind a second flag:
+
+```sh
+DEVENV_NETWORK_SMOKE=1 DEVENV_NETWORK_SMOKE_DOWNLOAD=1 scripts/network-smoke.sh
+```
+
+Do not make this script a required CI gate without an explicit network-enabled job. Network provider failures should not block the normal offline development loop.
+
+The catalog smoke is separate because it verifies the DevEnv-managed catalog layer instead of upstream provider metadata:
+
+```sh
+scripts/catalog-smoke.sh --help
+DEVENV_CATALOG_SMOKE=1 \
+DEVENV_CATALOG_SMOKE_BASE_URL=https://github.com/<org>/devenv-metadata/releases/download/catalog-2026.05.23.1/v1 \
+scripts/catalog-smoke.sh
+```
+
+The default catalog smoke verifies the manifest and Go catalog payload, refreshes Go metadata from the catalog source, and checks that `list-remote go --offline` can read the refreshed catalog cache. It does not download a runtime artifact.
+
+An actual artifact download smoke remains behind a second flag:
+
+```sh
+DEVENV_CATALOG_SMOKE=1 \
+DEVENV_CATALOG_SMOKE_DOWNLOAD=1 \
+DEVENV_CATALOG_SMOKE_BASE_URL=https://github.com/<org>/devenv-metadata/releases/download/catalog-2026.05.23.1/v1 \
+scripts/catalog-smoke.sh
+```
+
+Do not make `scripts/catalog-smoke.sh` a required CI gate unless the job is explicitly network-enabled and points at an immutable catalog release or controlled mirror. The normal development and CI loop must remain offline by default.
+
 ## Local Packaging
 
 Package the host target locally:

@@ -176,11 +176,13 @@ DevEnv can discover Flutter SDKs from:
 
 - paths registered with `devenv add flutter <path>`;
 - paths listed in `DEVENV_FLUTTER_CANDIDATE_PATHS`;
-- DevEnv-owned installs from fixture-backed metadata.
+- DevEnv-owned installs from provider metadata.
 
 Version detection is file-system based. A Flutter SDK should contain `bin/flutter`, `bin/dart`, and version metadata in `VERSION`, `version`, `bin/internal/flutter.version`, or a versioned SDK directory name.
 
-DevEnv does not generate Flutter projects, install Android Studio, install Xcode, or manage Android/iOS platform toolchains in this phase.
+Remote Flutter metadata uses the official stable channel release JSONs. `devenv list-remote flutter --refresh --channel stable` refreshes the metadata cache, and `--offline` reads that cache without network access. `--channel beta` and `--channel dev` are reserved for a later provider extension.
+
+DevEnv does not generate Flutter projects, install Android Studio, install Xcode, CocoaPods, or manage Android/iOS platform toolchains in this phase.
 
 ## Terraform And OpenTofu
 
@@ -211,7 +213,48 @@ Version detection is file-system based. A Rust toolchain should contain `bin/rus
 
 ## Install Runtimes
 
-Remote metadata is currently fixture-backed for offline development. Set the metadata source before using `list-remote` or `install`:
+### Provider Support Levels
+
+DevEnv uses provider capabilities to describe what each tool can do.
+
+| Tool | Provider | Support | Direct install status | Next action |
+| --- | --- | --- | --- | --- |
+| Go | official | Direct | Official metadata/cache path is supported. | Use `devenv list-remote go --refresh` or fixture metadata. |
+| Java | temurin | Direct | Temurin metadata is supported. | Use `--distribution temurin`. |
+| Node.js | official | Direct | Official index/checksum metadata is supported. | Use `devenv list-remote node --refresh`. |
+| Flutter/Dart | stable | Direct | Stable channel metadata is supported. | Use `--channel stable`; beta/dev are deferred. |
+| Terraform | hashicorp | Direct | Official release/checksum metadata is supported. | Use `devenv list-remote terraform --refresh`. |
+| OpenTofu | opentofu | Direct | Official release/checksum metadata is supported. | Use `devenv list-remote opentofu --refresh`. |
+| Python | cpython | Direct, fixture-backed | Live CPython direct install is deferred. | Use `DEVENV_PYTHON_RELEASE_METADATA` for fixtures or `devenv add python <path>`; see `docs/adr/0008-python-install-strategy.md`. |
+| Rust | rustup | Delegated | DevEnv does not install Rust toolchains. | Use rustup, then let DevEnv discover `RUSTUP_HOME` or run `devenv add rust <path>`. |
+| Ruby | local | LocalOnly | Remote install is deferred. | Register an existing runtime with `devenv add ruby <path>`. |
+| PHP | local | LocalOnly | Remote install is deferred. | Register an existing runtime with `devenv add php <path>`. |
+
+### Remote Metadata And Cache
+
+Remote metadata is separate from runtime artifact downloads. `list-remote`, `metadata update`, and `metadata status` deal with small provider metadata. `install` is the command that downloads the selected runtime archive or binary.
+
+DevEnv reads metadata in this order:
+
+1. Explicit fixture or source override from environment.
+2. Explicit catalog file/base URL override.
+3. User/global mirror configuration or mirror environment variables.
+4. Existing fresh DevEnv metadata cache.
+5. Experimental DevEnv GitHub metadata catalog when enabled.
+6. Official provider refresh when `--refresh` or `metadata update` asks for it.
+7. Stale cache fallback when policy allows it.
+
+`--offline` disables network catalog and official network refresh. Offline commands can still use fixture overrides, local file catalog sources, mirror file URLs, and cache entries.
+
+Metadata cache entries are stored under:
+
+```text
+$DEVENV_HOME/cache/metadata/<tool>/<provider>/metadata.json
+```
+
+The cache file is DevEnv-owned state. Do not edit it by hand; seed metadata through fixture variables, mirror variables, or `devenv metadata update`.
+
+Normalized fixture variables are still supported for tests, mirrors, and air-gapped environments:
 
 ```sh
 export DEVENV_JAVA_RELEASE_METADATA=/path/to/java-releases.toml
@@ -223,17 +266,156 @@ export DEVENV_TERRAFORM_RELEASE_METADATA=/path/to/terraform-releases.toml
 export DEVENV_OPENTOFU_RELEASE_METADATA=/path/to/opentofu-releases.toml
 ```
 
+Some providers also accept official-style fixtures or mirror base URLs. These inputs use the provider parser and write the same metadata cache format:
+
+```sh
+export DEVENV_GO_OFFICIAL_RELEASE_METADATA=/path/to/go-official.json
+export DEVENV_NODE_OFFICIAL_RELEASE_INDEX=/path/to/node-index.json
+export DEVENV_NODE_OFFICIAL_SHASUMS_DIR=/path/to/node-shasums
+export DEVENV_NODE_OFFICIAL_BASE_URL=https://mirror.example.com/nodejs
+export DEVENV_FLUTTER_OFFICIAL_RELEASES_DIR=/path/to/flutter-release-jsons
+export DEVENV_FLUTTER_OFFICIAL_BASE_URL=https://mirror.example.com/flutter
+export DEVENV_TERRAFORM_OFFICIAL_RELEASE_INDEX=/path/to/terraform-releases.json
+export DEVENV_TERRAFORM_OFFICIAL_SHA256SUMS_DIR=/path/to/terraform-shasums
+export DEVENV_TERRAFORM_OFFICIAL_BASE_URL=https://mirror.example.com/terraform
+export DEVENV_OPENTOFU_OFFICIAL_RELEASES=/path/to/opentofu-releases.json
+export DEVENV_OPENTOFU_OFFICIAL_SHA256SUMS_DIR=/path/to/opentofu-shasums
+export DEVENV_OPENTOFU_OFFICIAL_BASE_URL=https://mirror.example.com/opentofu
+```
+
+Java Temurin currently supports normalized Java fixture metadata and Temurin API JSON fixtures through `DEVENV_JAVA_TEMURIN_RELEASE_METADATA`. Live Temurin HTTP refresh is deferred.
+
+Python is fixture-backed for install pipeline tests and local experiments. Live CPython Direct install is deferred by `docs/adr/0008-python-install-strategy.md`.
+
+### GitHub Metadata Catalog
+
+The DevEnv metadata catalog is an experimental normalized metadata mirror. It stores small metadata payloads such as runtime versions, artifact URLs, checksums, platform mappings, provider selectors, and yanked/deprecated policy. It does not store runtime artifact archives. Runtime archives are downloaded only by `devenv install` after metadata resolution.
+
+Rollout state:
+
+- Experimental: catalog is opt-in through `--source catalog`, an explicit local catalog path/URL, or `DEVENV_ENABLE_CATALOG=1` together with `DEVENV_CATALOG_BASE_URL`.
+- Beta: catalog can be included in `--source auto` for selected providers after Go/Node catalog smoke tests and signature verification are stable.
+- Stable: catalog becomes the preferred default only after release publishing, signing, trust root policy, mirror docs, and rollback procedures are exercised.
+
+Opt-in catalog flow:
+
+```sh
+export DEVENV_ENABLE_CATALOG=1
+export DEVENV_CATALOG_BASE_URL=file:///mirror/devenv-metadata/v1
+
+devenv metadata verify-catalog go --catalog /mirror/devenv-metadata/v1 --source file
+devenv metadata update go --source catalog
+devenv metadata status go
+devenv list-remote go --offline
+devenv install go@1.23
+```
+
+`metadata verify-catalog` validates the manifest signature, catalog freshness, and payload checksums before you use the catalog as a source. Current local development fixtures use a simple digest-backed signature verifier; production catalog publishing is documented separately and must use the accepted trust policy before the catalog becomes a default source.
+
+Maintainers can run a live catalog smoke separately from the default offline test suite:
+
+```sh
+scripts/catalog-smoke.sh --help
+DEVENV_CATALOG_SMOKE=1 DEVENV_CATALOG_SMOKE_BASE_URL=file:///mirror/devenv-metadata/v1 scripts/catalog-smoke.sh
+```
+
+The smoke verifies the catalog and refreshes Go metadata without downloading a runtime artifact. Set `DEVENV_CATALOG_SMOKE_DOWNLOAD=1` only when the job is allowed to download and install a runtime archive.
+
+Source selection:
+
+```sh
+devenv metadata update go --source auto
+devenv metadata update go --source env
+devenv metadata update go --source cache
+devenv metadata update go --source catalog
+devenv metadata update go --source official
+```
+
+- `auto` keeps fixture overrides and fresh cache ahead of network sources.
+- `env` and `cache` do not use the network.
+- `catalog` makes catalog failures visible instead of hiding them behind official provider fallback.
+- `official` skips catalog and uses the provider's official refresh path when implemented.
+
+Fixture overrides remain first-class. A configured `DEVENV_GO_RELEASE_METADATA`, `DEVENV_NODE_RELEASE_METADATA`, or other normalized fixture variable wins over catalog source selection. This keeps tests, internal mirrors, and controlled air-gapped workflows stable while catalog support rolls out.
+
 List remote versions:
 
 ```sh
 devenv list-remote java
 devenv list-remote go
+devenv list-remote go --refresh
+devenv list-remote go --offline
 devenv list-remote node
 devenv list-remote python
-devenv list-remote flutter
+devenv list-remote flutter --channel stable
 devenv list-remote terraform
 devenv list-remote opentofu
 ```
+
+Inspect provider capability and metadata cache state:
+
+```sh
+devenv provider list
+devenv provider info java
+devenv provider info java temurin
+devenv metadata status
+devenv metadata status go
+devenv metadata verify-catalog go --catalog ./v1 --source file
+```
+
+Refresh metadata cache:
+
+```sh
+devenv metadata update go
+devenv metadata update go --source catalog
+devenv metadata update --all
+```
+
+`provider list` shows whether a tool is `Direct`, `Delegated`, or `LocalOnly`, along with checksum policy and selector dimensions such as Java distribution, Flutter channel, or Python implementation. `provider info` also reports whether an experimental catalog metadata path exists for that provider. `metadata status` combines provider capability with cache state: `missing`, `fresh`, `stale`, or `corrupt`, and prints `metadata_source` as `env`, `cache`, `catalog`, `official`, `stale-cache`, or `missing` where that can be determined. `metadata verify-catalog` verifies a configured or local catalog manifest and payloads without adding a new top-level catalog command.
+
+Ruby and PHP report `LocalOnly`, Rust reports `Delegated`, and Python reports fixture-backed Direct support with live provider selection deferred by ADR.
+
+### Mirrors And Air-Gapped Use
+
+Mirror and air-gapped flows should keep project version selection separate from provider source selection. Put selected versions in `devenv.toml`, `.tool-versions`, or shell scope. Put source overrides in environment or future user/global provider config.
+
+Recommended mirror paths:
+
+- verified DevEnv catalog release archives extracted to an internal file or HTTP mirror;
+- normalized fixture files for simple internal catalogs;
+- official-style fixture directories for parser-compatible mirrors;
+- provider base URLs such as `DEVENV_NODE_OFFICIAL_BASE_URL`, `DEVENV_FLUTTER_OFFICIAL_BASE_URL`, `DEVENV_TERRAFORM_OFFICIAL_BASE_URL`, or `DEVENV_OPENTOFU_OFFICIAL_BASE_URL`.
+
+For catalog-based air-gapped use, verify the catalog archive on an online machine, copy the extracted `v1/` directory to the internal mirror, then update metadata from a file URL:
+
+```sh
+# online or connected staging machine
+devenv metadata verify-catalog go --catalog /staging/devenv-metadata/v1 --source file
+
+# air-gapped machine
+export DEVENV_ENABLE_CATALOG=1
+export DEVENV_CATALOG_BASE_URL=file:///mirror/devenv-metadata/v1
+devenv metadata update go --source catalog
+devenv list-remote go --offline
+```
+
+For fixture-based air-gapped use, seed metadata before going offline:
+
+```sh
+DEVENV_GO_OFFICIAL_RELEASE_METADATA=/mirror/go/releases.json devenv metadata update go
+devenv list-remote go --offline
+```
+
+Troubleshooting catalog sources:
+
+- `catalog unavailable` means the configured catalog path or URL is missing or unreachable. Check `DEVENV_CATALOG_BASE_URL`, pass `--catalog <path-or-url>`, or use `--source official` if official provider fallback is acceptable.
+- `catalog network failure` means DevEnv could not fetch the catalog over HTTP. In `auto`, this may fall back to official provider refresh when policy allows it; in `--source catalog`, it fails.
+- `catalog trust failure` means signature, trust root, freshness, schema, or payload checksum verification failed. Do not ignore this or silently fall back. Use a newer signed catalog release, fix the mirror, or inspect the trust root configuration.
+- `metadata_source=catalog` in `devenv metadata status <tool>` means the local cache was populated from a verified catalog payload. `catalog_version`, `manifest_sha256`, and `payload_sha256` are printed when present.
+
+Artifact downloads use a separate cache under `$DEVENV_HOME/cache/downloads`. Checksum-bearing artifacts are promoted into checksum-addressed cache entries only after verification. Providers without usable checksums are not accepted for default Direct install unless a future opt-in policy defines that risk.
+
+Default tests and normal documentation verification do not require network access. Real provider network checks live in `scripts/network-smoke.sh` and only run when `DEVENV_NETWORK_SMOKE=1` is set.
 
 Install into DevEnv-owned storage:
 

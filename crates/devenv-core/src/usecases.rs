@@ -5,9 +5,10 @@ use crate::{
     ActivationPlan, ArchiveExtractor, ArtifactResolver, ChecksumVerifier, Clock, CommandInvocation,
     CommandOutput, CommandRunner, CoreError, CoreResult, Downloader, ExtractionManifest,
     InstallPlan, InstallStore, InstallTransaction, InstallTransactionManager, Installation,
-    InstallationMetadata, InstalledRuntimeValidator, LockKey, LockManager, Platform,
-    RegisteredRuntime, RuntimeRegistry, ShimSpec, ShimWriter, ToolAdapter, ToolName, Version,
-    VersionMatcher, VersionRequirement, VersionSource,
+    InstallationMetadata, InstalledRuntimeValidator, LockKey, LockManager, MetadataFetchMode,
+    MetadataFetchOutcome, MetadataHttpClient, MetadataHttpRequest, Platform, RegisteredRuntime,
+    RuntimeRegistry, ShimSpec, ShimWriter, ToolAdapter, ToolName, Version, VersionMatcher,
+    VersionRequirement, VersionSource,
 };
 
 pub const ACTIVE_SHIM_ENV: &str = "DEVENV_ACTIVE_SHIM";
@@ -205,6 +206,112 @@ pub fn list_remote_versions(
     version_source.list_versions(tool)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataPayloadFetchRequest {
+    url: String,
+    mode: MetadataFetchMode,
+    timeout_seconds: u64,
+    max_body_bytes: usize,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+impl MetadataPayloadFetchRequest {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            mode: MetadataFetchMode::Online,
+            timeout_seconds: 10,
+            max_body_bytes: 2 * 1024 * 1024,
+            etag: None,
+            last_modified: None,
+        }
+    }
+
+    pub fn offline(mut self) -> Self {
+        self.mode = MetadataFetchMode::Offline;
+        self
+    }
+
+    pub fn with_timeout_seconds(mut self, seconds: u64) -> Self {
+        self.timeout_seconds = seconds;
+        self
+    }
+
+    pub fn with_max_body_bytes(mut self, bytes: usize) -> Self {
+        self.max_body_bytes = bytes;
+        self
+    }
+
+    pub fn with_etag(mut self, etag: impl Into<String>) -> Self {
+        self.etag = Some(etag.into());
+        self
+    }
+
+    pub fn with_last_modified(mut self, last_modified: impl Into<String>) -> Self {
+        self.last_modified = Some(last_modified.into());
+        self
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn mode(&self) -> MetadataFetchMode {
+        self.mode
+    }
+}
+
+pub fn fetch_metadata_payload(
+    request: MetadataPayloadFetchRequest,
+    client: &mut dyn MetadataHttpClient,
+) -> CoreResult<MetadataFetchOutcome> {
+    if request.mode == MetadataFetchMode::Offline {
+        return Ok(MetadataFetchOutcome::Offline {
+            reason: "offline mode enabled; metadata HTTP client was not called".to_owned(),
+        });
+    }
+
+    let mut http_request = MetadataHttpRequest::new(request.url.clone())
+        .with_timeout_seconds(request.timeout_seconds)
+        .with_max_body_bytes(request.max_body_bytes);
+    if let Some(etag) = request.etag {
+        http_request = http_request.with_header("If-None-Match", etag);
+    }
+    if let Some(last_modified) = request.last_modified {
+        http_request = http_request.with_header("If-Modified-Since", last_modified);
+    }
+
+    let response = client.fetch_metadata(&http_request)?;
+    match response.status() {
+        200 => {
+            if response.body().len() > http_request.max_body_bytes() {
+                return Err(CoreError::message(format!(
+                    "metadata HTTP response from `{}` exceeded max body size of {} bytes",
+                    http_request.url(),
+                    http_request.max_body_bytes()
+                )));
+            }
+            Ok(MetadataFetchOutcome::Fetched(response))
+        }
+        304 => Ok(MetadataFetchOutcome::NotModified {
+            headers: response.headers().clone(),
+        }),
+        status @ 400..=499 => Err(CoreError::message(format!(
+            "metadata HTTP request to `{}` failed with status {status}; provider metadata endpoint was not found or rejected the request; check provider URL, fixture override, or mirror configuration",
+            http_request.url()
+        ))),
+        status @ 500..=599 => Err(CoreError::message(format!(
+            "metadata HTTP request to `{}` failed with status {status}; retryable=true",
+            http_request.url()
+        ))),
+        status => Err(CoreError::message(format!(
+            "metadata HTTP request to `{}` returned unsupported status {status}",
+            http_request.url()
+        ))),
+    }
+}
+
 pub fn collect_shim_specs(adapters: &[&dyn ToolAdapter]) -> CoreResult<Vec<ShimSpec>> {
     let mut specs = Vec::new();
     let mut binary_owners = BTreeMap::<String, ToolName>::new();
@@ -310,6 +417,28 @@ pub fn install_runtime(
     }
 }
 
+pub fn plan_install_runtime(
+    request: &InstallRuntimeRequest,
+    artifact_resolver: &dyn ArtifactResolver,
+    transactions: &dyn InstallTransactionManager,
+) -> CoreResult<InstallPlan> {
+    let artifact = artifact_resolver.resolve_artifact(
+        request.tool(),
+        request.version(),
+        request.platform(),
+    )?;
+    let install_root =
+        transactions.install_root(request.tool(), request.version(), request.platform());
+
+    Ok(InstallPlan::new(
+        request.tool().clone(),
+        request.version().clone(),
+        request.platform(),
+        artifact,
+        install_root,
+    ))
+}
+
 pub fn install_lock_key(tool: &ToolName, version: &Version, platform: Platform) -> LockKey {
     LockKey::new(format!(
         "install:{}:{}:{}",
@@ -356,22 +485,7 @@ fn install_runtime_with_lock(
     request: &InstallRuntimeRequest,
     ports: &mut InstallRuntimePorts<'_>,
 ) -> CoreResult<InstallationMetadata> {
-    let artifact = ports.artifact_resolver.resolve_artifact(
-        request.tool(),
-        request.version(),
-        request.platform(),
-    )?;
-    let install_root =
-        ports
-            .transactions
-            .install_root(request.tool(), request.version(), request.platform());
-    let plan = InstallPlan::new(
-        request.tool().clone(),
-        request.version().clone(),
-        request.platform(),
-        artifact,
-        install_root,
-    );
+    let plan = plan_install_runtime(request, ports.artifact_resolver, ports.transactions)?;
     let transaction = ports.transactions.begin(&plan)?;
     let result = run_install_transaction(request, &plan, &transaction, ports);
     let cleanup_result = ports.transactions.cleanup(&transaction);

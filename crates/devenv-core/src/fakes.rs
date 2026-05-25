@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::{
@@ -6,9 +6,14 @@ use crate::{
     Clock, CommandInvocation, CommandOutput, CommandRunner, ConfigRepository, CoreError,
     CoreResult, DownloadedArtifact, Downloader, EnvOperation, ExtractionManifest, InstallPlan,
     InstallStore, InstallTransaction, InstallTransactionManager, Installation,
-    InstallationMetadata, LockKey, LockManager, Platform, PlatformDetector, RegisteredRuntime,
-    RuntimeRegistry, ShimSpec, ShimWriter, ToolAdapter, ToolMetadata, ToolName, Version,
-    VersionMatcher, VersionRequirement, VersionScheme, VersionSource,
+    InstallationMetadata, LockKey, LockManager, MetadataHttpClient, MetadataHttpRequest,
+    MetadataHttpResponse, Platform, PlatformDetector, RegisteredRuntime, RuntimeRegistry, ShimSpec,
+    ShimWriter, ToolAdapter, ToolMetadata, ToolName, Version, VersionMatcher, VersionRequirement,
+    VersionScheme, VersionSource,
+};
+use crate::{
+    CatalogFetchRequest, CatalogFetchResponse, CatalogPayloadDescriptor, CatalogSource,
+    CatalogTrustFailure, CatalogTrustVerifier, CatalogVerificationResult, TrustRoot,
 };
 
 #[derive(Debug, Clone)]
@@ -100,6 +105,201 @@ impl StaticVersionSource {
 impl VersionSource for StaticVersionSource {
     fn list_versions(&self, tool: &ToolName) -> CoreResult<Vec<Version>> {
         Ok(self.versions.get(tool).cloned().unwrap_or_default())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FakeMetadataHttpClient {
+    responses: VecDeque<CoreResult<MetadataHttpResponse>>,
+    calls: Vec<MetadataHttpRequest>,
+}
+
+impl FakeMetadataHttpClient {
+    pub fn new(response: MetadataHttpResponse) -> Self {
+        let mut responses = VecDeque::new();
+        responses.push_back(Ok(response));
+        Self {
+            responses,
+            calls: Vec::new(),
+        }
+    }
+
+    pub fn failing(message: impl Into<String>) -> Self {
+        let mut responses = VecDeque::new();
+        responses.push_back(Err(CoreError::message(message.into())));
+        Self {
+            responses,
+            calls: Vec::new(),
+        }
+    }
+
+    pub fn push_response(&mut self, response: MetadataHttpResponse) {
+        self.responses.push_back(Ok(response));
+    }
+
+    pub fn push_error(&mut self, message: impl Into<String>) {
+        self.responses
+            .push_back(Err(CoreError::message(message.into())));
+    }
+
+    pub fn calls(&self) -> &[MetadataHttpRequest] {
+        &self.calls
+    }
+}
+
+impl MetadataHttpClient for FakeMetadataHttpClient {
+    fn fetch_metadata(
+        &mut self,
+        request: &MetadataHttpRequest,
+    ) -> CoreResult<MetadataHttpResponse> {
+        self.calls.push(request.clone());
+        self.responses.pop_front().unwrap_or_else(|| {
+            Err(CoreError::message(
+                "fake metadata HTTP response queue is empty",
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FakeCatalogSource {
+    manifest_responses: VecDeque<CoreResult<CatalogFetchResponse>>,
+    payload_responses: VecDeque<CoreResult<CatalogFetchResponse>>,
+    manifest_calls: Vec<CatalogFetchRequest>,
+    payload_calls: Vec<CatalogPayloadDescriptor>,
+}
+
+impl FakeCatalogSource {
+    pub fn new(manifest_response: CatalogFetchResponse) -> Self {
+        let mut manifest_responses = VecDeque::new();
+        manifest_responses.push_back(Ok(manifest_response));
+        Self {
+            manifest_responses,
+            payload_responses: VecDeque::new(),
+            manifest_calls: Vec::new(),
+            payload_calls: Vec::new(),
+        }
+    }
+
+    pub fn network_failing(message: impl Into<String>) -> Self {
+        let mut manifest_responses = VecDeque::new();
+        manifest_responses.push_back(Err(CoreError::catalog_network(message.into())));
+        Self {
+            manifest_responses,
+            payload_responses: VecDeque::new(),
+            manifest_calls: Vec::new(),
+            payload_calls: Vec::new(),
+        }
+    }
+
+    pub fn push_manifest_response(&mut self, response: CatalogFetchResponse) {
+        self.manifest_responses.push_back(Ok(response));
+    }
+
+    pub fn push_payload_response(&mut self, response: CatalogFetchResponse) {
+        self.payload_responses.push_back(Ok(response));
+    }
+
+    pub fn push_payload_error(&mut self, message: impl Into<String>) {
+        self.payload_responses
+            .push_back(Err(CoreError::catalog_network(message.into())));
+    }
+
+    pub fn manifest_calls(&self) -> &[CatalogFetchRequest] {
+        &self.manifest_calls
+    }
+
+    pub fn payload_calls(&self) -> &[CatalogPayloadDescriptor] {
+        &self.payload_calls
+    }
+}
+
+impl CatalogSource for FakeCatalogSource {
+    fn fetch_manifest(
+        &mut self,
+        request: &CatalogFetchRequest,
+    ) -> CoreResult<CatalogFetchResponse> {
+        self.manifest_calls.push(request.clone());
+        self.manifest_responses.pop_front().unwrap_or_else(|| {
+            Err(CoreError::catalog_network(
+                "fake catalog manifest response queue is empty",
+            ))
+        })
+    }
+
+    fn fetch_payload(
+        &mut self,
+        descriptor: &CatalogPayloadDescriptor,
+    ) -> CoreResult<CatalogFetchResponse> {
+        self.payload_calls.push(descriptor.clone());
+        self.payload_responses.pop_front().unwrap_or_else(|| {
+            Err(CoreError::catalog_network(
+                "fake catalog payload response queue is empty",
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogTrustVerificationCall {
+    manifest_len: usize,
+    signature_len: usize,
+    trust_root: TrustRoot,
+}
+
+impl CatalogTrustVerificationCall {
+    pub fn manifest_len(&self) -> usize {
+        self.manifest_len
+    }
+
+    pub fn signature_len(&self) -> usize {
+        self.signature_len
+    }
+
+    pub fn trust_root(&self) -> &TrustRoot {
+        &self.trust_root
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FakeCatalogTrustVerifier {
+    result: CatalogVerificationResult,
+    calls: Vec<CatalogTrustVerificationCall>,
+}
+
+impl FakeCatalogTrustVerifier {
+    pub fn passing(trust_root_id: impl Into<String>) -> Self {
+        Self {
+            result: CatalogVerificationResult::trusted(trust_root_id),
+            calls: Vec::new(),
+        }
+    }
+
+    pub fn failing(failure: CatalogTrustFailure) -> Self {
+        Self {
+            result: CatalogVerificationResult::rejected(failure),
+            calls: Vec::new(),
+        }
+    }
+
+    pub fn calls(&self) -> &[CatalogTrustVerificationCall] {
+        &self.calls
+    }
+}
+
+impl CatalogTrustVerifier for FakeCatalogTrustVerifier {
+    fn verify_manifest(
+        &mut self,
+        manifest_bytes: &[u8],
+        signature_bytes: &[u8],
+        trust_root: &TrustRoot,
+    ) -> CoreResult<CatalogVerificationResult> {
+        self.calls.push(CatalogTrustVerificationCall {
+            manifest_len: manifest_bytes.len(),
+            signature_len: signature_bytes.len(),
+            trust_root: trust_root.clone(),
+        });
+        Ok(self.result.clone())
     }
 }
 

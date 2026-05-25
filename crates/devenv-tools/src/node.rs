@@ -1,12 +1,18 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use devenv_core::{
     ActivationPlan, Architecture, ArchiveType, Artifact, ArtifactResolver, CoreError, CoreResult,
-    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform,
-    RegisteredRuntime, RuntimeRegistry, ToolAdapter, ToolMetadata, ToolName, Version,
-    VersionMatcher, VersionRequirement, VersionScheme, VersionSource,
+    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform, ProviderId,
+    RegisteredRuntime, RemoteRelease, RemoteReleaseIndex, ResolvedArtifact, RuntimeRegistry,
+    ToolAdapter, ToolMetadata, ToolName, Version, VersionMatcher, VersionRequirement,
+    VersionScheme, VersionSource,
 };
+use serde::Deserialize;
+
+pub const NODE_OFFICIAL_INDEX_URL: &str = "https://nodejs.org/dist/index.json";
+pub const NODE_OFFICIAL_DIST_BASE_URL: &str = "https://nodejs.org/dist";
 
 #[derive(Debug, Clone)]
 pub struct NodeToolAdapter {
@@ -296,6 +302,23 @@ impl NodeReleaseMetadata {
         &self.releases
     }
 
+    pub fn from_release_index(index: &RemoteReleaseIndex) -> CoreResult<Self> {
+        if index.tool().as_str() != "node" {
+            return Err(CoreError::message(format!(
+                "Node.js release metadata cannot be built from `{}` index",
+                index.tool()
+            )));
+        }
+
+        let releases = index
+            .releases()
+            .iter()
+            .map(node_release_from_remote_release)
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self { releases })
+    }
+
     fn release_for_version(&self, version: &Version) -> CoreResult<&NodeRelease> {
         if let Some(exact) = self
             .releases
@@ -328,6 +351,113 @@ impl NodeReleaseMetadata {
                     version
                 ))
             })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeOfficialReleaseMetadata {
+    index: RemoteReleaseIndex,
+}
+
+impl NodeOfficialReleaseMetadata {
+    pub fn parse(
+        index_json: &str,
+        shasums_by_version: &BTreeMap<String, String>,
+    ) -> CoreResult<Self> {
+        let releases =
+            serde_json::from_str::<Vec<NodeOfficialIndexEntry>>(index_json).map_err(|error| {
+                CoreError::message(format!("failed to parse Node.js official index: {error}"))
+            })?;
+        let tool = node_tool_name();
+        let provider =
+            ProviderId::new("official").expect("built-in Node.js provider id should be valid");
+        let releases = releases
+            .into_iter()
+            .map(|release| {
+                node_remote_release_from_official_entry(
+                    &tool,
+                    &provider,
+                    release,
+                    shasums_by_version,
+                )
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self {
+            index: RemoteReleaseIndex::new(tool, provider, releases),
+        })
+    }
+
+    pub fn release_index(&self) -> &RemoteReleaseIndex {
+        &self.index
+    }
+
+    pub fn into_release_index(self) -> RemoteReleaseIndex {
+        self.index
+    }
+
+    pub fn into_release_metadata(self) -> CoreResult<NodeReleaseMetadata> {
+        NodeReleaseMetadata::from_release_index(&self.index)
+    }
+
+    pub fn required_shasums_versions(index_json: &str) -> CoreResult<Vec<String>> {
+        node_official_required_shasums_versions(index_json)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeCatalogReleaseMetadata {
+    index: RemoteReleaseIndex,
+}
+
+impl NodeCatalogReleaseMetadata {
+    pub fn parse(input: &str) -> CoreResult<Self> {
+        let payload = serde_json::from_str::<NodeCatalogPayload>(input).map_err(|error| {
+            CoreError::message(format!("failed to parse Node.js catalog metadata: {error}"))
+        })?;
+        if payload.schema_version != 1 {
+            return Err(CoreError::message(format!(
+                "unsupported Node.js catalog metadata schema version {}: expected 1",
+                payload.schema_version
+            )));
+        }
+        if payload.tool != "node" {
+            return Err(CoreError::message(format!(
+                "Node.js catalog metadata cannot parse tool `{}`",
+                payload.tool
+            )));
+        }
+        if payload.provider != "official" {
+            return Err(CoreError::message(format!(
+                "Node.js catalog metadata cannot parse provider `{}`",
+                payload.provider
+            )));
+        }
+
+        let tool = node_tool_name();
+        let provider =
+            ProviderId::new("official").expect("built-in Node.js provider id should be valid");
+        let releases = payload
+            .releases
+            .into_iter()
+            .map(|release| node_remote_release_from_catalog_payload(&tool, &provider, release))
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self {
+            index: RemoteReleaseIndex::new(tool, provider, releases),
+        })
+    }
+
+    pub fn release_index(&self) -> &RemoteReleaseIndex {
+        &self.index
+    }
+
+    pub fn into_release_index(self) -> RemoteReleaseIndex {
+        self.index
+    }
+
+    pub fn into_release_metadata(self) -> CoreResult<NodeReleaseMetadata> {
+        NodeReleaseMetadata::from_release_index(&self.index)
     }
 }
 
@@ -714,6 +844,383 @@ fn parse_node_release_file(value: &toml::Value) -> CoreResult<NodeReleaseFile> {
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct NodeOfficialIndexEntry {
+    version: String,
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeCatalogPayload {
+    schema_version: u32,
+    tool: String,
+    provider: String,
+    #[serde(default)]
+    releases: Vec<NodeCatalogReleasePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeCatalogReleasePayload {
+    version: String,
+    #[serde(default = "default_true")]
+    stable: bool,
+    #[serde(default)]
+    yanked: bool,
+    #[serde(default)]
+    yanked_reason: Option<String>,
+    #[serde(default)]
+    upstream_version: Option<String>,
+    #[serde(default)]
+    artifacts: Vec<NodeCatalogArtifactPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeCatalogArtifactPayload {
+    filename: String,
+    os: String,
+    arch: String,
+    url: String,
+    #[serde(default)]
+    checksum: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default = "default_archive_kind")]
+    kind: String,
+    #[serde(default = "default_true")]
+    installable: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_archive_kind() -> String {
+    "archive".to_owned()
+}
+
+pub fn node_official_required_shasums_versions(index_json: &str) -> CoreResult<Vec<String>> {
+    let releases =
+        serde_json::from_str::<Vec<NodeOfficialIndexEntry>>(index_json).map_err(|error| {
+            CoreError::message(format!("failed to parse Node.js official index: {error}"))
+        })?;
+    let mut versions = releases
+        .into_iter()
+        .filter(|release| {
+            release
+                .files
+                .iter()
+                .any(|file| node_archive_file_from_official_token(&release.version, file).is_some())
+        })
+        .map(|release| normalize_node_version(&release.version))
+        .collect::<CoreResult<Vec<_>>>()?;
+    versions.sort_by(|left, right| compare_node_version_desc_raw(left, right));
+    versions.dedup();
+    Ok(versions)
+}
+
+pub fn parse_node_shasums256(input: &str) -> CoreResult<BTreeMap<String, String>> {
+    let mut checksums = BTreeMap::new();
+    for (line_index, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let checksum = parts.next().ok_or_else(|| {
+            CoreError::message(format!(
+                "invalid Node.js SHASUMS256 line {}: missing checksum",
+                line_index + 1
+            ))
+        })?;
+        let filename = parts.next().ok_or_else(|| {
+            CoreError::message(format!(
+                "invalid Node.js SHASUMS256 line {}: missing filename",
+                line_index + 1
+            ))
+        })?;
+        if parts.next().is_some() {
+            return Err(CoreError::message(format!(
+                "invalid Node.js SHASUMS256 line {}: expected `<sha256>  <filename>`",
+                line_index + 1
+            )));
+        }
+        if checksum.len() != 64
+            || !checksum
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(CoreError::message(format!(
+                "invalid Node.js SHASUMS256 line {}: checksum for `{filename}` is not a sha256 hex digest",
+                line_index + 1
+            )));
+        }
+        checksums.insert(filename.to_owned(), format!("sha256:{checksum}"));
+    }
+
+    Ok(checksums)
+}
+
+fn node_remote_release_from_official_entry(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release: NodeOfficialIndexEntry,
+    shasums_by_version: &BTreeMap<String, String>,
+) -> CoreResult<RemoteRelease> {
+    let normalized = normalize_node_version(&release.version)?;
+    let version = Version::new(&normalized)?;
+    let checksums = shasums_by_version.get(&normalized).ok_or_else(|| {
+        CoreError::message(format!(
+            "invalid Node.js official metadata: missing SHASUMS256 payload for {}",
+            release.version
+        ))
+    })?;
+    let checksums = parse_node_shasums256(checksums)?;
+    let artifacts = release
+        .files
+        .iter()
+        .filter_map(|file| node_archive_file_from_official_token(&release.version, file))
+        .map(|archive| {
+            node_remote_artifact_from_official_archive(
+                tool, provider, &version, archive, &checksums,
+            )
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(RemoteRelease::new(version, artifacts)
+        .with_metadata_field("upstream_version", release.version)
+        .with_metadata_field("stable", "true"))
+}
+
+fn node_remote_release_from_catalog_payload(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release: NodeCatalogReleasePayload,
+) -> CoreResult<RemoteRelease> {
+    let normalized = normalize_node_version(&release.version)?;
+    let version = Version::new(&normalized)?;
+    let stable = release.stable.to_string();
+    let yanked = release.yanked.to_string();
+    let artifacts = release
+        .artifacts
+        .into_iter()
+        .filter_map(|artifact| {
+            node_remote_artifact_from_catalog_payload(tool, provider, &version, artifact)
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    let upstream_version = release
+        .upstream_version
+        .unwrap_or_else(|| format!("v{}", version.raw()));
+    let mut remote_release = RemoteRelease::new(version, artifacts)
+        .with_metadata_field("upstream_version", upstream_version)
+        .with_metadata_field("stable", stable)
+        .with_metadata_field("yanked", yanked);
+    if let Some(reason) = release.yanked_reason {
+        remote_release = remote_release.with_metadata_field("yanked_reason", reason);
+    }
+
+    Ok(remote_release)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NodeOfficialArchive {
+    filename: String,
+    os: &'static str,
+    arch: &'static str,
+    platform: Platform,
+}
+
+fn node_archive_file_from_official_token(
+    upstream_version: &str,
+    token: &str,
+) -> Option<NodeOfficialArchive> {
+    let normalized = normalize_node_version(upstream_version).ok()?;
+    let filename_version = format!("v{normalized}");
+    match token {
+        "linux-x64" => Some(NodeOfficialArchive {
+            filename: format!("node-{filename_version}-linux-x64.tar.gz"),
+            os: "linux",
+            arch: "x64",
+            platform: Platform::new(OperatingSystem::Linux, Architecture::X64),
+        }),
+        "linux-arm64" => Some(NodeOfficialArchive {
+            filename: format!("node-{filename_version}-linux-arm64.tar.gz"),
+            os: "linux",
+            arch: "arm64",
+            platform: Platform::new(OperatingSystem::Linux, Architecture::Arm64),
+        }),
+        "osx-x64-tar" | "darwin-x64" => Some(NodeOfficialArchive {
+            filename: format!("node-{filename_version}-darwin-x64.tar.gz"),
+            os: "darwin",
+            arch: "x64",
+            platform: Platform::new(OperatingSystem::Macos, Architecture::X64),
+        }),
+        "osx-arm64-tar" | "darwin-arm64" => Some(NodeOfficialArchive {
+            filename: format!("node-{filename_version}-darwin-arm64.tar.gz"),
+            os: "darwin",
+            arch: "arm64",
+            platform: Platform::new(OperatingSystem::Macos, Architecture::Arm64),
+        }),
+        "win-x64-zip" => Some(NodeOfficialArchive {
+            filename: format!("node-{filename_version}-win-x64.zip"),
+            os: "win",
+            arch: "x64",
+            platform: Platform::new(OperatingSystem::Windows, Architecture::X64),
+        }),
+        "win-arm64-zip" => Some(NodeOfficialArchive {
+            filename: format!("node-{filename_version}-win-arm64.zip"),
+            os: "win",
+            arch: "arm64",
+            platform: Platform::new(OperatingSystem::Windows, Architecture::Arm64),
+        }),
+        _ => None,
+    }
+}
+
+fn node_remote_artifact_from_official_archive(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release_version: &Version,
+    archive: NodeOfficialArchive,
+    checksums: &BTreeMap<String, String>,
+) -> CoreResult<ResolvedArtifact> {
+    let checksum = checksums.get(&archive.filename).ok_or_else(|| {
+        CoreError::message(format!(
+            "invalid Node.js official metadata: archive `{}` is missing SHASUMS256 checksum",
+            archive.filename
+        ))
+    })?;
+    let archive_type = archive_type_for_node_file(&archive.filename)?;
+    let artifact = Artifact::new(
+        format!(
+            "{}/v{}/{}",
+            NODE_OFFICIAL_DIST_BASE_URL,
+            release_version.raw(),
+            archive.filename
+        ),
+        archive.filename.clone(),
+        archive_type,
+        Some(checksum.clone()),
+    );
+
+    Ok(ResolvedArtifact::new(
+        tool.clone(),
+        provider.clone(),
+        release_version.clone(),
+        archive.platform,
+        artifact,
+    )
+    .with_metadata_field("filename", archive.filename)
+    .with_metadata_field("kind", "archive")
+    .with_metadata_field("node_os", archive.os)
+    .with_metadata_field("node_arch", archive.arch))
+}
+
+fn node_remote_artifact_from_catalog_payload(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release_version: &Version,
+    artifact: NodeCatalogArtifactPayload,
+) -> Option<CoreResult<ResolvedArtifact>> {
+    if !artifact.installable || artifact.kind != "archive" {
+        return None;
+    }
+    let checksum = artifact
+        .checksum
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_owned();
+
+    let result = (|| {
+        let platform =
+            node_platform_from_catalog_fields(&artifact.os, &artifact.arch).ok_or_else(|| {
+                CoreError::message(format!(
+                    "invalid Node.js catalog metadata: unsupported platform {}-{} for `{}`",
+                    artifact.os, artifact.arch, artifact.filename
+                ))
+            })?;
+        if !checksum.starts_with("sha256:") {
+            return Err(CoreError::message(format!(
+                "invalid Node.js catalog metadata: archive `{}` checksum must use sha256:<hex>",
+                artifact.filename
+            )));
+        }
+        let archive_type = archive_type_for_node_file(&artifact.filename)?;
+        let mut resolved_artifact = Artifact::new(
+            artifact.url,
+            artifact.filename.clone(),
+            archive_type,
+            Some(checksum),
+        );
+        if let Some(size) = artifact.size {
+            resolved_artifact = resolved_artifact.with_size(size);
+        }
+
+        Ok(ResolvedArtifact::new(
+            tool.clone(),
+            provider.clone(),
+            release_version.clone(),
+            platform,
+            resolved_artifact,
+        )
+        .with_metadata_field("filename", artifact.filename)
+        .with_metadata_field("kind", artifact.kind)
+        .with_metadata_field("node_os", normalized_node_catalog_os(&artifact.os))
+        .with_metadata_field("node_arch", artifact.arch))
+    })();
+
+    Some(result)
+}
+
+fn node_release_from_remote_release(release: &RemoteRelease) -> CoreResult<NodeRelease> {
+    let stable = release.metadata_field("stable") != Some("false")
+        && release.metadata_field("yanked") != Some("true");
+    let files = release
+        .artifacts()
+        .iter()
+        .map(node_release_file_from_remote_artifact)
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(NodeRelease {
+        version: release.version().clone(),
+        stable,
+        files,
+    })
+}
+
+fn node_release_file_from_remote_artifact(
+    resolved: &ResolvedArtifact,
+) -> CoreResult<NodeReleaseFile> {
+    let artifact = resolved.artifact();
+    let filename = resolved
+        .metadata_field("filename")
+        .unwrap_or_else(|| artifact.filename())
+        .to_owned();
+    let os = resolved
+        .metadata_field("node_os")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| node_artifact_os(resolved.platform()).to_owned());
+    let arch = resolved
+        .metadata_field("node_arch")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| node_artifact_arch(resolved.platform()).to_owned());
+    let kind = resolved
+        .metadata_field("kind")
+        .unwrap_or("archive")
+        .to_owned();
+
+    Ok(NodeReleaseFile {
+        filename,
+        os,
+        arch,
+        kind,
+        sha256: artifact.checksum().map(ToOwned::to_owned),
+        size: artifact.size(),
+        url: Some(artifact.url().to_owned()),
+    })
+}
+
 fn required_string<'a>(
     table: &'a toml::map::Map<String, toml::Value>,
     key: &str,
@@ -742,6 +1249,30 @@ fn node_artifact_arch(platform: Platform) -> &'static str {
     }
 }
 
+fn node_platform_from_catalog_fields(os: &str, arch: &str) -> Option<Platform> {
+    let os = match os {
+        "darwin" | "macos" => OperatingSystem::Macos,
+        "linux" => OperatingSystem::Linux,
+        "win" | "windows" => OperatingSystem::Windows,
+        _ => return None,
+    };
+    let arch = match arch {
+        "x64" | "amd64" => Architecture::X64,
+        "arm64" => Architecture::Arm64,
+        _ => return None,
+    };
+
+    Some(Platform::new(os, arch))
+}
+
+fn normalized_node_catalog_os(os: &str) -> String {
+    match os {
+        "macos" => "darwin".to_owned(),
+        "windows" => "win".to_owned(),
+        value => value.to_owned(),
+    }
+}
+
 fn archive_type_for_node_file(filename: &str) -> CoreResult<ArchiveType> {
     if filename.ends_with(".tar.gz") {
         Ok(ArchiveType::TarGz)
@@ -755,12 +1286,16 @@ fn archive_type_for_node_file(filename: &str) -> CoreResult<ArchiveType> {
 }
 
 fn compare_node_version_desc(left: &Version, right: &Version) -> Ordering {
-    let left_key = NodeVersionKey::parse(left.raw());
-    let right_key = NodeVersionKey::parse(right.raw());
+    compare_node_version_desc_raw(left.raw(), right.raw())
+}
+
+fn compare_node_version_desc_raw(left: &str, right: &str) -> Ordering {
+    let left_key = NodeVersionKey::parse(left);
+    let right_key = NodeVersionKey::parse(right);
 
     match (left_key, right_key) {
         (Ok(left_key), Ok(right_key)) => right_key.cmp(&left_key),
-        _ => right.raw().cmp(left.raw()),
+        _ => right.cmp(left),
     }
 }
 

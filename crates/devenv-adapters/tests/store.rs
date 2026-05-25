@@ -69,6 +69,8 @@ fn store_layout_creates_expected_directories() {
         "installs",
         "registry",
         "downloads",
+        "cache/metadata",
+        "cache/downloads",
         "shims",
         "state",
         "logs",

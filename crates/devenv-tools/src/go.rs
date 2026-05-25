@@ -3,10 +3,14 @@ use std::path::{Path, PathBuf};
 
 use devenv_core::{
     ActivationPlan, Architecture, ArchiveType, Artifact, ArtifactResolver, CoreError, CoreResult,
-    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform,
-    RegisteredRuntime, RuntimeRegistry, ToolAdapter, ToolMetadata, ToolName, Version,
-    VersionMatcher, VersionRequirement, VersionScheme, VersionSource,
+    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform, ProviderId,
+    RegisteredRuntime, RemoteRelease, RemoteReleaseIndex, ResolvedArtifact, RuntimeRegistry,
+    ToolAdapter, ToolMetadata, ToolName, Version, VersionMatcher, VersionRequirement,
+    VersionScheme, VersionSource,
 };
+use serde::Deserialize;
+
+pub const GO_OFFICIAL_METADATA_URL: &str = "https://go.dev/dl/?mode=json";
 
 #[derive(Debug, Clone)]
 pub struct GoToolAdapter {
@@ -306,6 +310,23 @@ impl GoReleaseMetadata {
         &self.releases
     }
 
+    pub fn from_release_index(index: &RemoteReleaseIndex) -> CoreResult<Self> {
+        if index.tool().as_str() != "go" {
+            return Err(CoreError::message(format!(
+                "Go release metadata cannot be built from `{}` index",
+                index.tool()
+            )));
+        }
+
+        let releases = index
+            .releases()
+            .iter()
+            .map(go_release_from_remote_release)
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self { releases })
+    }
+
     fn release_for_version(&self, version: &Version) -> CoreResult<&GoRelease> {
         let normalized = normalize_go_version(version.raw())?;
         self.releases
@@ -317,6 +338,174 @@ impl GoReleaseMetadata {
                     version
                 ))
             })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoOfficialReleaseMetadata {
+    index: RemoteReleaseIndex,
+}
+
+impl GoOfficialReleaseMetadata {
+    pub fn parse(input: &str) -> CoreResult<Self> {
+        let releases =
+            serde_json::from_str::<Vec<GoOfficialReleasePayload>>(input).map_err(|error| {
+                CoreError::message(format!("failed to parse Go official metadata: {error}"))
+            })?;
+        let tool = go_tool_name();
+        let provider =
+            ProviderId::new("official").expect("built-in Go provider id should be valid");
+        let releases = releases
+            .into_iter()
+            .map(|release| go_remote_release_from_official_payload(&tool, &provider, release))
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self {
+            index: RemoteReleaseIndex::new(tool, provider, releases),
+        })
+    }
+
+    pub fn release_index(&self) -> &RemoteReleaseIndex {
+        &self.index
+    }
+
+    pub fn into_release_index(self) -> RemoteReleaseIndex {
+        self.index
+    }
+
+    pub fn into_release_metadata(self) -> CoreResult<GoReleaseMetadata> {
+        GoReleaseMetadata::from_release_index(&self.index)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoCatalogReleaseMetadata {
+    index: RemoteReleaseIndex,
+}
+
+impl GoCatalogReleaseMetadata {
+    pub fn parse(input: &str) -> CoreResult<Self> {
+        let payload = serde_json::from_str::<GoCatalogPayload>(input).map_err(|error| {
+            CoreError::message(format!("failed to parse Go catalog metadata: {error}"))
+        })?;
+        if payload.schema_version != 1 {
+            return Err(CoreError::message(format!(
+                "unsupported Go catalog metadata schema version {}: expected 1",
+                payload.schema_version
+            )));
+        }
+        if payload.tool != "go" {
+            return Err(CoreError::message(format!(
+                "Go catalog metadata cannot parse tool `{}`",
+                payload.tool
+            )));
+        }
+        if payload.provider != "official" {
+            return Err(CoreError::message(format!(
+                "Go catalog metadata cannot parse provider `{}`",
+                payload.provider
+            )));
+        }
+
+        let tool = go_tool_name();
+        let provider =
+            ProviderId::new("official").expect("built-in Go provider id should be valid");
+        let releases = payload
+            .releases
+            .into_iter()
+            .map(|release| go_remote_release_from_catalog_payload(&tool, &provider, release))
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self {
+            index: RemoteReleaseIndex::new(tool, provider, releases),
+        })
+    }
+
+    pub fn release_index(&self) -> &RemoteReleaseIndex {
+        &self.index
+    }
+
+    pub fn into_release_index(self) -> RemoteReleaseIndex {
+        self.index
+    }
+
+    pub fn into_release_metadata(self) -> CoreResult<GoReleaseMetadata> {
+        GoReleaseMetadata::from_release_index(&self.index)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GoRemoteReleaseVersionSource {
+    index: RemoteReleaseIndex,
+}
+
+impl GoRemoteReleaseVersionSource {
+    pub fn new(index: RemoteReleaseIndex) -> Self {
+        Self { index }
+    }
+}
+
+impl VersionSource for GoRemoteReleaseVersionSource {
+    fn list_versions(&self, tool: &ToolName) -> CoreResult<Vec<Version>> {
+        if tool.as_str() != "go" {
+            return Ok(Vec::new());
+        }
+
+        let mut versions = self
+            .index
+            .releases()
+            .iter()
+            .filter(|release| release.metadata_field("stable") != Some("false"))
+            .filter(|release| release.metadata_field("yanked") != Some("true"))
+            .map(|release| release.version().clone())
+            .collect::<Vec<_>>();
+        versions.sort_by(compare_go_version_desc);
+        versions.dedup_by(|left, right| left.raw() == right.raw());
+
+        Ok(versions)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GoRemoteArtifactResolver {
+    index: RemoteReleaseIndex,
+}
+
+impl GoRemoteArtifactResolver {
+    pub fn new(index: RemoteReleaseIndex) -> Self {
+        Self { index }
+    }
+}
+
+impl ArtifactResolver for GoRemoteArtifactResolver {
+    fn resolve_artifact(
+        &self,
+        tool: &ToolName,
+        version: &Version,
+        platform: Platform,
+    ) -> CoreResult<Artifact> {
+        if tool.as_str() != "go" {
+            return Err(CoreError::message(format!(
+                "Go artifact resolver cannot resolve `{tool}`"
+            )));
+        }
+
+        let release = self.index.release_for_version(version).ok_or_else(|| {
+            CoreError::message(format!("Go version `{version}` was not found in metadata"))
+        })?;
+        let resolved = release
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.platform() == platform)
+            .ok_or_else(|| {
+                CoreError::message(format!(
+                    "Go {} does not provide an archive for {}",
+                    version,
+                    platform.id()
+                ))
+            })?;
+
+        Ok(resolved.artifact().clone())
     }
 }
 
@@ -608,6 +797,306 @@ fn parse_go_release_file(value: &toml::Value) -> CoreResult<GoReleaseFile> {
         sha256,
         size,
         url,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct GoOfficialReleasePayload {
+    version: String,
+    stable: bool,
+    #[serde(default)]
+    files: Vec<GoOfficialReleaseFilePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoOfficialReleaseFilePayload {
+    filename: String,
+    os: String,
+    arch: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoCatalogPayload {
+    schema_version: u32,
+    tool: String,
+    provider: String,
+    #[serde(default)]
+    releases: Vec<GoCatalogReleasePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoCatalogReleasePayload {
+    version: String,
+    #[serde(default = "default_true")]
+    stable: bool,
+    #[serde(default)]
+    yanked: bool,
+    #[serde(default)]
+    yanked_reason: Option<String>,
+    #[serde(default)]
+    upstream_version: Option<String>,
+    #[serde(default)]
+    artifacts: Vec<GoCatalogArtifactPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoCatalogArtifactPayload {
+    filename: String,
+    os: String,
+    arch: String,
+    url: String,
+    checksum: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default = "default_archive_kind")]
+    kind: String,
+    #[serde(default = "default_true")]
+    installable: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_archive_kind() -> String {
+    "archive".to_owned()
+}
+
+fn go_remote_release_from_official_payload(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release: GoOfficialReleasePayload,
+) -> CoreResult<RemoteRelease> {
+    let normalized = normalize_go_version(&release.version)?;
+    let version = Version::new(&normalized)?;
+    let stable = release.stable.to_string();
+    let artifacts = release
+        .files
+        .into_iter()
+        .filter(|file| file.kind.as_deref().unwrap_or("archive") == "archive")
+        .filter_map(|file| go_remote_artifact_from_official_file(tool, provider, &version, file))
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(RemoteRelease::new(version, artifacts)
+        .with_metadata_field("upstream_version", release.version)
+        .with_metadata_field("stable", stable))
+}
+
+fn go_remote_release_from_catalog_payload(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release: GoCatalogReleasePayload,
+) -> CoreResult<RemoteRelease> {
+    let normalized = normalize_go_version(&release.version)?;
+    let version = Version::new(&normalized)?;
+    let stable = release.stable.to_string();
+    let yanked = release.yanked.to_string();
+    let artifacts = release
+        .artifacts
+        .into_iter()
+        .filter(|artifact| artifact.installable)
+        .filter(|artifact| artifact.kind == "archive")
+        .map(|artifact| go_remote_artifact_from_catalog_payload(tool, provider, &version, artifact))
+        .collect::<CoreResult<Vec<_>>>()?;
+    let upstream_version = release
+        .upstream_version
+        .unwrap_or_else(|| format!("go{}", version.raw()));
+    let mut remote_release = RemoteRelease::new(version, artifacts)
+        .with_metadata_field("upstream_version", upstream_version)
+        .with_metadata_field("stable", stable)
+        .with_metadata_field("yanked", yanked);
+    if let Some(reason) = release.yanked_reason {
+        remote_release = remote_release.with_metadata_field("yanked_reason", reason);
+    }
+
+    Ok(remote_release)
+}
+
+fn go_remote_artifact_from_official_file(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release_version: &Version,
+    file: GoOfficialReleaseFilePayload,
+) -> Option<CoreResult<ResolvedArtifact>> {
+    let platform = go_platform_from_official_file(&file.os, &file.arch)?;
+
+    let result = (|| {
+        let file_version = file
+            .version
+            .as_deref()
+            .map(normalize_go_version)
+            .transpose()?;
+        if let Some(file_version) = file_version {
+            if file_version != release_version.raw() {
+                return Err(CoreError::message(format!(
+                    "invalid Go official metadata: file `{}` has version `{}` but belongs to release `{}`",
+                    file.filename, file_version, release_version
+                )));
+            }
+        }
+
+        let archive_type = archive_type_for_go_file(&file.filename)?;
+        let sha256 = file
+            .sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CoreError::message(format!(
+                    "invalid Go official metadata: archive `{}` is missing sha256",
+                    file.filename
+                ))
+            })?;
+        let url = file
+            .url
+            .unwrap_or_else(|| format!("https://go.dev/dl/{}", file.filename));
+        let mut artifact = Artifact::new(
+            url,
+            file.filename.clone(),
+            archive_type,
+            Some(format!("sha256:{sha256}")),
+        );
+        if let Some(size) = file.size {
+            artifact = artifact.with_size(size);
+        }
+
+        Ok(ResolvedArtifact::new(
+            tool.clone(),
+            provider.clone(),
+            release_version.clone(),
+            platform,
+            artifact,
+        )
+        .with_metadata_field("filename", file.filename)
+        .with_metadata_field("kind", file.kind.unwrap_or_else(|| "archive".to_owned()))
+        .with_metadata_field("go_os", file.os)
+        .with_metadata_field("go_arch", file.arch))
+    })();
+
+    Some(result)
+}
+
+fn go_remote_artifact_from_catalog_payload(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release_version: &Version,
+    artifact: GoCatalogArtifactPayload,
+) -> CoreResult<ResolvedArtifact> {
+    let platform =
+        go_platform_from_official_file(&artifact.os, &artifact.arch).ok_or_else(|| {
+            CoreError::message(format!(
+                "invalid Go catalog metadata: unsupported platform {}-{} for `{}`",
+                artifact.os, artifact.arch, artifact.filename
+            ))
+        })?;
+    let checksum = artifact.checksum.trim();
+    if !checksum.starts_with("sha256:") {
+        return Err(CoreError::message(format!(
+            "invalid Go catalog metadata: archive `{}` checksum must use sha256:<hex>",
+            artifact.filename
+        )));
+    }
+    let archive_type = archive_type_for_go_file(&artifact.filename)?;
+    let mut resolved_artifact = Artifact::new(
+        artifact.url,
+        artifact.filename.clone(),
+        archive_type,
+        Some(checksum.to_owned()),
+    );
+    if let Some(size) = artifact.size {
+        resolved_artifact = resolved_artifact.with_size(size);
+    }
+
+    Ok(ResolvedArtifact::new(
+        tool.clone(),
+        provider.clone(),
+        release_version.clone(),
+        platform,
+        resolved_artifact,
+    )
+    .with_metadata_field("filename", artifact.filename)
+    .with_metadata_field("kind", artifact.kind)
+    .with_metadata_field("go_os", artifact.os)
+    .with_metadata_field("go_arch", artifact.arch))
+}
+
+fn go_platform_from_official_file(os: &str, arch: &str) -> Option<Platform> {
+    let os = match os {
+        "darwin" => OperatingSystem::Macos,
+        "linux" => OperatingSystem::Linux,
+        "windows" => OperatingSystem::Windows,
+        _ => return None,
+    };
+    let arch = match arch {
+        "amd64" => Architecture::X64,
+        "arm64" => Architecture::Arm64,
+        _ => return None,
+    };
+
+    Some(Platform::new(os, arch))
+}
+
+fn go_release_from_remote_release(release: &RemoteRelease) -> CoreResult<GoRelease> {
+    let stable = release.metadata_field("stable") != Some("false")
+        && release.metadata_field("yanked") != Some("true");
+    let files = release
+        .artifacts()
+        .iter()
+        .map(go_release_file_from_remote_artifact)
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(GoRelease {
+        version: release.version().clone(),
+        stable,
+        files,
+    })
+}
+
+fn go_release_file_from_remote_artifact(resolved: &ResolvedArtifact) -> CoreResult<GoReleaseFile> {
+    let artifact = resolved.artifact();
+    let filename = resolved
+        .metadata_field("filename")
+        .unwrap_or_else(|| artifact.filename())
+        .to_owned();
+    let os = resolved
+        .metadata_field("go_os")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            go_artifact_os(resolved.platform())
+                .unwrap_or("unknown")
+                .to_owned()
+        });
+    let arch = resolved
+        .metadata_field("go_arch")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            go_artifact_arch(resolved.platform())
+                .unwrap_or("unknown")
+                .to_owned()
+        });
+    let kind = resolved
+        .metadata_field("kind")
+        .unwrap_or("archive")
+        .to_owned();
+
+    Ok(GoReleaseFile {
+        filename,
+        os,
+        arch,
+        kind,
+        sha256: artifact.checksum().map(ToOwned::to_owned),
+        size: artifact.size(),
+        url: Some(artifact.url().to_owned()),
     })
 }
 

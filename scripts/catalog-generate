@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+case "${1:-}" in
+  -h|--help)
+    cargo run --quiet -p devenv-catalog -- --help
+    ;;
+  *)
+    cargo run --quiet -p devenv-catalog -- generate "$@"
+    ;;
+esac

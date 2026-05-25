@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "catalog_id": "dev.devenv.catalog",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "expires_at": "2026-05-29T00:00:00Z",
+  "catalog_version": "2026.05.22.1",
+  "min_devenv_version": "0.1.0",
+  "sequence": 1,
+  "entries": [
+    {
+      "tool": "go",
+      "provider": "official",
+      "path": "go/official/releases.json",
+      "sha256": "sha256:cea684cdfb638cbde4ef409bcdfbc8de911e71ce80e5e58997751ecf5bfaaca1",
+      "payload_kind": "normalized-release-index",
+      "ttl_seconds": 86400,
+      "platforms": [
+        "macos-arm64",
+        "linux-x64"
+      ],
+      "selector": {
+        "channel": "stable",
+        "distribution": "go"
+      }
+    },
+    {
+      "tool": "node",
+      "provider": "official",
+      "path": "node/official/releases.json",
+      "sha256": "sha256:8b1be3ad021ea0468b2ba07e5d65185e68f7daa574f1cd070a58779f7c84cd35",
+      "payload_kind": "normalized-release-index",
+      "ttl_seconds": 86400,
+      "platforms": [
+        "macos-arm64",
+        "windows-x64",
+        "linux-x64"
+      ],
+      "selector": {
+        "channel": "lts",
+        "distribution": "node",
+        "implementation": "node"
+      }
+    }
+  ],
+  "metadata": {
+    "publisher": "DevEnv fixture catalog",
+    "release_url": "https://github.com/example/devenv-metadata/releases/tag/catalog-v1-2026.05.22.1",
+    "notes": "fixture manifest for schema-v1 tests; signature is intentionally omitted"
+  }
+}

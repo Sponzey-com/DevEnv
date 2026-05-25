@@ -2,9 +2,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    ActivationPlan, ArchiveType, Artifact, CoreResult, DownloadedArtifact, EnvDelta,
+    ActivationPlan, ArchiveType, Artifact, CatalogFetchRequest, CatalogFetchResponse,
+    CatalogPayloadDescriptor, CatalogVerificationResult, CoreResult, DownloadedArtifact, EnvDelta,
     ExtractionManifest, InstallPlan, InstallTransaction, Installation, InstallationMetadata,
-    Platform, RegisteredRuntime, ShimSpec, ToolName, Version, VersionRequirement, VersionScheme,
+    MetadataCacheEntry, MetadataCacheKey, MetadataCacheStatus, MetadataFreshness,
+    MetadataHttpRequest, MetadataHttpResponse, Platform, RegisteredRuntime, ShimSpec, ToolName,
+    TrustRoot, Version, VersionRequirement, VersionScheme,
 };
 
 /// Built-in or plugin-provided behavior for one supported tool.
@@ -133,6 +136,56 @@ pub trait InstallStore {
             .map(|installation| InstallationMetadata::new(installation, "unknown", None, "unknown"))
             .collect()
     }
+}
+
+/// Cache for remote provider metadata payloads and normalized release indexes.
+pub trait MetadataCache {
+    fn write_metadata(&mut self, entry: MetadataCacheEntry) -> CoreResult<()>;
+    fn read_metadata(&self, key: &MetadataCacheKey) -> CoreResult<Option<MetadataCacheEntry>>;
+    fn remove_metadata(&mut self, key: &MetadataCacheKey) -> CoreResult<bool>;
+
+    fn metadata_status(
+        &self,
+        key: &MetadataCacheKey,
+        clock: &dyn Clock,
+    ) -> CoreResult<MetadataCacheStatus> {
+        let Some(entry) = self.read_metadata(key)? else {
+            return Ok(MetadataCacheStatus::Missing);
+        };
+        match entry.freshness_at(&clock.now_utc()?) {
+            MetadataFreshness::Fresh => Ok(MetadataCacheStatus::Fresh(entry)),
+            MetadataFreshness::Stale => Ok(MetadataCacheStatus::Stale(entry)),
+            MetadataFreshness::Corrupt => Ok(MetadataCacheStatus::Corrupt {
+                reason: "metadata cache entry has an invalid timestamp".to_owned(),
+            }),
+        }
+    }
+}
+
+/// Fetches small remote metadata payloads through a delivery-specific HTTP adapter.
+pub trait MetadataHttpClient {
+    fn fetch_metadata(&mut self, request: &MetadataHttpRequest)
+    -> CoreResult<MetadataHttpResponse>;
+}
+
+/// Fetches a catalog manifest and payloads from a delivery-specific adapter.
+pub trait CatalogSource {
+    fn fetch_manifest(&mut self, request: &CatalogFetchRequest)
+    -> CoreResult<CatalogFetchResponse>;
+    fn fetch_payload(
+        &mut self,
+        descriptor: &CatalogPayloadDescriptor,
+    ) -> CoreResult<CatalogFetchResponse>;
+}
+
+/// Verifies catalog trust without exposing the signature backend to core.
+pub trait CatalogTrustVerifier {
+    fn verify_manifest(
+        &mut self,
+        manifest_bytes: &[u8],
+        signature_bytes: &[u8],
+        trust_root: &TrustRoot,
+    ) -> CoreResult<CatalogVerificationResult>;
 }
 
 /// Writes executable shims for tool binaries.

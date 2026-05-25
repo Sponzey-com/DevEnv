@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "tool": "go",
+  "provider": "official",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "source": {
+    "kind": "official-api",
+    "urls": [
+      "https://go.dev/dl/?mode=json"
+    ],
+    "retrieved_at": "2026-05-22T00:00:00Z",
+    "generator": "devenv-catalog-fixture/0.1.0"
+  },
+  "releases": [
+    {
+      "version": "1.22.5",
+      "normalized_version": "1.22.5",
+      "aliases": [
+        "1.22"
+      ],
+      "release_date": "2024-07-02",
+      "selectors": {
+        "channel": "stable",
+        "distribution": "go",
+        "stable": "true"
+      },
+      "yanked": false,
+      "deprecated": false,
+      "reason": null,
+      "notes_url": "https://go.dev/doc/devel/release#go1.22.5",
+      "artifacts": [
+        {
+          "platform": {
+            "os": "macos",
+            "arch": "arm64"
+          },
+          "url": "https://go.dev/dl/go1.22.5.darwin-arm64.tar.gz",
+          "filename": "go1.22.5.darwin-arm64.tar.gz",
+          "archive_type": "tar.gz",
+          "checksum": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "metadata": {
+            "go_os": "darwin",
+            "go_arch": "arm64",
+            "kind": "archive"
+          }
+        },
+        {
+          "platform": {
+            "os": "linux",
+            "arch": "x64"
+          },
+          "url": "https://go.dev/dl/go1.22.5.linux-amd64.tar.gz",
+          "filename": "go1.22.5.linux-amd64.tar.gz",
+          "archive_type": "tar.gz",
+          "checksum": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "metadata": {
+            "go_os": "linux",
+            "go_arch": "amd64",
+            "kind": "archive"
+          }
+        }
+      ]
+    },
+    {
+      "version": "1.21.0",
+      "normalized_version": "1.21.0",
+      "aliases": [
+        "1.21"
+      ],
+      "release_date": "2023-08-08",
+      "selectors": {
+        "channel": "stable",
+        "distribution": "go",
+        "stable": "false"
+      },
+      "yanked": true,
+      "deprecated": false,
+      "reason": "security rollback example for catalog policy tests",
+      "notes_url": "https://go.dev/doc/devel/release#go1.21.0",
+      "artifacts": [
+        {
+          "platform": {
+            "os": "linux",
+            "arch": "x64"
+          },
+          "url": "https://go.dev/dl/go1.21.0.linux-amd64.tar.gz",
+          "filename": "go1.21.0.linux-amd64.tar.gz",
+          "archive_type": "tar.gz",
+          "checksum": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "metadata": {
+            "go_os": "linux",
+            "go_arch": "amd64",
+            "kind": "archive"
+          }
+        }
+      ]
+    },
+    {
+      "version": "1.20.0",
+      "normalized_version": "1.20.0",
+      "aliases": [
+        "1.20"
+      ],
+      "release_date": "2023-02-01",
+      "selectors": {
+        "channel": "stable",
+        "distribution": "go",
+        "stable": "false"
+      },
+      "yanked": false,
+      "deprecated": true,
+      "reason": "example deprecated release with a checksum-less artifact",
+      "notes_url": "https://go.dev/doc/devel/release#go1.20.0",
+      "artifacts": [
+        {
+          "platform": {
+            "os": "macos",
+            "arch": "arm64"
+          },
+          "url": "https://go.dev/dl/go1.20.0.darwin-arm64.tar.gz",
+          "filename": "go1.20.0.darwin-arm64.tar.gz",
+          "archive_type": "tar.gz",
+          "checksum": null,
+          "checksum_algorithm": null,
+          "installable": false,
+          "install_block_reason": "missing checksum",
+          "metadata": {
+            "go_os": "darwin",
+            "go_arch": "arm64",
+            "kind": "archive"
+          }
+        }
+      ]
+    }
+  ]
+}

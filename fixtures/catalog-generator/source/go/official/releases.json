@@ -1,0 +1,38 @@
+[
+  {
+    "version": "go1.21.0",
+    "stable": true,
+    "files": [
+      {
+        "filename": "go1.21.0.linux-amd64.tar.gz",
+        "os": "linux",
+        "arch": "amd64",
+        "kind": "archive",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "size": 33
+      }
+    ]
+  },
+  {
+    "version": "go1.22.5",
+    "stable": true,
+    "files": [
+      {
+        "filename": "go1.22.5.linux-amd64.tar.gz",
+        "os": "linux",
+        "arch": "amd64",
+        "kind": "archive",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "size": 22
+      },
+      {
+        "filename": "go1.22.5.darwin-arm64.tar.gz",
+        "os": "darwin",
+        "arch": "arm64",
+        "kind": "archive",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "size": 11
+      }
+    ]
+  }
+]

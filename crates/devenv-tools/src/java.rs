@@ -4,10 +4,15 @@ use std::path::{Path, PathBuf};
 
 use devenv_core::{
     ActivationPlan, Architecture, ArchiveType, Artifact, ArtifactResolver, CoreError, CoreResult,
-    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform,
-    RegisteredRuntime, RuntimeRegistry, ToolAdapter, ToolDistribution, ToolMetadata, ToolName,
-    Version, VersionMatcher, VersionRequirement, VersionScheme, VersionSource,
+    InstallStore, Installation, InstalledRuntimeValidator, OperatingSystem, Platform, ProviderId,
+    RegisteredRuntime, RemoteRelease, RemoteReleaseIndex, ResolvedArtifact, RuntimeRegistry,
+    ToolAdapter, ToolDistribution, ToolMetadata, ToolName, Version, VersionMatcher,
+    VersionRequirement, VersionScheme, VersionSource,
 };
+use serde::Deserialize;
+
+pub const JAVA_TEMURIN_METADATA_URL_HINT: &str =
+    "https://api.adoptium.net/v3/assets/feature_releases/{feature}/ga";
 
 #[derive(Debug, Clone)]
 pub struct JavaToolAdapter {
@@ -336,6 +341,23 @@ impl JavaReleaseMetadata {
         &self.releases
     }
 
+    pub fn from_release_index(index: &RemoteReleaseIndex) -> CoreResult<Self> {
+        if index.tool().as_str() != "java" {
+            return Err(CoreError::message(format!(
+                "Java release metadata cannot be built from `{}` index",
+                index.tool()
+            )));
+        }
+
+        let releases = index
+            .releases()
+            .iter()
+            .map(java_release_from_remote_release)
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self { releases })
+    }
+
     fn release_for_requirement(
         &self,
         requirement: &Version,
@@ -376,6 +398,43 @@ impl JavaReleaseMetadata {
                 distribution.as_str()
             ))
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaTemurinReleaseMetadata {
+    index: RemoteReleaseIndex,
+}
+
+impl JavaTemurinReleaseMetadata {
+    pub fn parse(input: &str) -> CoreResult<Self> {
+        let releases =
+            serde_json::from_str::<Vec<AdoptiumReleasePayload>>(input).map_err(|error| {
+                CoreError::message(format!("failed to parse Java Temurin metadata: {error}"))
+            })?;
+        let tool = java_tool_name();
+        let provider =
+            ProviderId::new("temurin").expect("built-in Java provider id should be valid");
+        let releases = releases
+            .into_iter()
+            .map(|release| java_remote_release_from_adoptium_payload(&tool, &provider, release))
+            .collect::<CoreResult<Vec<_>>>()?;
+
+        Ok(Self {
+            index: RemoteReleaseIndex::new(tool, provider, releases),
+        })
+    }
+
+    pub fn release_index(&self) -> &RemoteReleaseIndex {
+        &self.index
+    }
+
+    pub fn into_release_index(self) -> RemoteReleaseIndex {
+        self.index
+    }
+
+    pub fn into_release_metadata(self) -> CoreResult<JavaReleaseMetadata> {
+        JavaReleaseMetadata::from_release_index(&self.index)
     }
 }
 
@@ -763,6 +822,289 @@ fn parse_java_release_file(value: &toml::Value) -> CoreResult<JavaReleaseFile> {
         sha256,
         size,
         url,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct AdoptiumReleasePayload {
+    #[serde(default)]
+    release_name: Option<String>,
+    #[serde(default)]
+    release_type: Option<String>,
+    #[serde(default)]
+    version_data: Option<AdoptiumVersionData>,
+    #[serde(default)]
+    binaries: Vec<AdoptiumBinaryPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdoptiumVersionData {
+    #[serde(default)]
+    major: Option<u32>,
+    #[serde(default)]
+    openjdk_version: Option<String>,
+    #[serde(default)]
+    semver: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdoptiumBinaryPayload {
+    #[serde(default)]
+    architecture: Option<String>,
+    #[serde(default)]
+    os: Option<String>,
+    #[serde(default)]
+    image_type: Option<String>,
+    #[serde(default)]
+    package: Option<AdoptiumPackagePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdoptiumPackagePayload {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    link: Option<String>,
+    #[serde(default)]
+    checksum: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+fn java_remote_release_from_adoptium_payload(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release: AdoptiumReleasePayload,
+) -> CoreResult<RemoteRelease> {
+    let version_raw = java_adoptium_release_version(&release)?;
+    let normalized = normalize_java_version(&version_raw)?;
+    let version = Version::new(&normalized)?;
+    let feature = release
+        .version_data
+        .as_ref()
+        .and_then(|data| data.major)
+        .unwrap_or(JavaVersionKey::parse(&normalized)?.feature());
+    let stable = release
+        .release_type
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case("ga"))
+        .unwrap_or(true);
+    let artifacts = release
+        .binaries
+        .into_iter()
+        .filter_map(|binary| {
+            java_remote_artifact_from_adoptium_binary(tool, provider, &version, binary)
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    let mut remote_release = RemoteRelease::new(version, artifacts)
+        .with_metadata_field("feature", feature.to_string())
+        .with_metadata_field("distribution", "temurin")
+        .with_metadata_field("stable", stable.to_string())
+        .with_metadata_field("image_type", "jdk")
+        .with_metadata_field("package_type", "archive")
+        .with_metadata_field("upstream_version", version_raw);
+    if let Some(release_name) = release.release_name {
+        remote_release = remote_release.with_metadata_field("release_name", release_name);
+    }
+
+    Ok(remote_release)
+}
+
+fn java_adoptium_release_version(release: &AdoptiumReleasePayload) -> CoreResult<String> {
+    if let Some(version_data) = release.version_data.as_ref() {
+        for candidate in [
+            version_data.openjdk_version.as_deref(),
+            version_data.semver.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !candidate.trim().is_empty() {
+                return Ok(candidate.trim().to_owned());
+            }
+        }
+    }
+
+    release
+        .release_name
+        .as_deref()
+        .and_then(|name| name.trim().strip_prefix("jdk-").or(Some(name.trim())))
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            CoreError::message(
+                "invalid Java Temurin metadata: release is missing version_data.openjdk_version",
+            )
+        })
+}
+
+fn java_remote_artifact_from_adoptium_binary(
+    tool: &ToolName,
+    provider: &ProviderId,
+    release_version: &Version,
+    binary: AdoptiumBinaryPayload,
+) -> Option<CoreResult<ResolvedArtifact>> {
+    let image_type = binary
+        .image_type
+        .as_deref()
+        .unwrap_or("jdk")
+        .to_ascii_lowercase();
+    if image_type != "jdk" {
+        return None;
+    }
+
+    let os = binary.os.as_deref()?;
+    let arch = binary.architecture.as_deref()?;
+    let (java_os, platform_os) = java_adoptium_os(os)?;
+    let (java_arch, platform_arch) = java_adoptium_arch(arch)?;
+    let platform = Platform::new(platform_os, platform_arch);
+    let package = binary.package?;
+
+    let result = (|| {
+        let filename = package
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CoreError::message("invalid Java Temurin metadata: JDK package is missing name")
+            })?;
+        let url = package
+            .link
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CoreError::message(format!(
+                    "invalid Java Temurin metadata: archive `{filename}` is missing link"
+                ))
+            })?;
+        let checksum = package
+            .checksum
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CoreError::message(format!(
+                    "invalid Java Temurin metadata: archive `{filename}` is missing checksum"
+                ))
+            })?;
+        let archive_type = archive_type_for_java_file(filename)?;
+        let mut artifact = Artifact::new(
+            url.to_owned(),
+            filename.to_owned(),
+            archive_type,
+            Some(normalized_sha256_checksum(checksum)),
+        );
+        if let Some(size) = package.size {
+            artifact = artifact.with_size(size);
+        }
+
+        Ok(ResolvedArtifact::new(
+            tool.clone(),
+            provider.clone(),
+            release_version.clone(),
+            platform,
+            artifact,
+        )
+        .with_metadata_field("filename", filename.to_owned())
+        .with_metadata_field("kind", "jdk")
+        .with_metadata_field("java_os", java_os)
+        .with_metadata_field("java_arch", java_arch)
+        .with_metadata_field("distribution", "temurin")
+        .with_metadata_field("image_type", "jdk")
+        .with_metadata_field("package_type", "archive"))
+    })();
+
+    Some(result)
+}
+
+fn java_adoptium_os(value: &str) -> Option<(&'static str, OperatingSystem)> {
+    match value.to_ascii_lowercase().as_str() {
+        "mac" | "macos" | "darwin" => Some(("macos", OperatingSystem::Macos)),
+        "linux" => Some(("linux", OperatingSystem::Linux)),
+        "windows" => Some(("windows", OperatingSystem::Windows)),
+        _ => None,
+    }
+}
+
+fn java_adoptium_arch(value: &str) -> Option<(&'static str, Architecture)> {
+    match value.to_ascii_lowercase().as_str() {
+        "x64" | "amd64" => Some(("x64", Architecture::X64)),
+        "aarch64" | "arm64" => Some(("arm64", Architecture::Arm64)),
+        _ => None,
+    }
+}
+
+fn normalized_sha256_checksum(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.starts_with("sha256:") {
+        trimmed.to_owned()
+    } else {
+        format!("sha256:{trimmed}")
+    }
+}
+
+fn java_release_from_remote_release(release: &RemoteRelease) -> CoreResult<JavaRelease> {
+    let feature = release
+        .metadata_field("feature")
+        .map(|value| {
+            value.parse::<u32>().map_err(|error| {
+                CoreError::message(format!(
+                    "invalid Java Temurin metadata: feature `{value}` is not numeric: {error}"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or(JavaVersionKey::parse(release.version().raw())?.feature());
+    let distribution = release
+        .metadata_field("distribution")
+        .map(JavaDistribution::named)
+        .transpose()?
+        .unwrap_or_default();
+    let stable = release.metadata_field("stable") != Some("false");
+    let files = release
+        .artifacts()
+        .iter()
+        .map(java_release_file_from_remote_artifact)
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    Ok(JavaRelease {
+        version: release.version().clone(),
+        feature,
+        distribution,
+        stable,
+        files,
+    })
+}
+
+fn java_release_file_from_remote_artifact(
+    resolved: &ResolvedArtifact,
+) -> CoreResult<JavaReleaseFile> {
+    let artifact = resolved.artifact();
+    let filename = resolved
+        .metadata_field("filename")
+        .unwrap_or_else(|| artifact.filename())
+        .to_owned();
+    let os = resolved
+        .metadata_field("java_os")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| java_artifact_os(resolved.platform()).to_owned());
+    let arch = resolved
+        .metadata_field("java_arch")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| java_artifact_arch(resolved.platform()).to_owned());
+    let kind = resolved.metadata_field("kind").unwrap_or("jdk").to_owned();
+
+    Ok(JavaReleaseFile {
+        filename,
+        os,
+        arch,
+        kind,
+        sha256: artifact.checksum().map(ToOwned::to_owned),
+        size: artifact.size(),
+        url: Some(artifact.url().to_owned()),
     })
 }
 

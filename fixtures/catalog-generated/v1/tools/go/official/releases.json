@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "tool": "go",
+  "provider": "official",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "source": {
+    "kind": "official-api",
+    "urls": [
+      "https://go.dev/dl/?mode=json"
+    ],
+    "retrieved_at": "2026-05-22T00:00:00Z",
+    "generator": "devenv-catalog/0.1.0"
+  },
+  "releases": [
+    {
+      "version": "1.22.5",
+      "normalized_version": "1.22.5",
+      "aliases": [
+        "1",
+        "1.22"
+      ],
+      "release_date": null,
+      "selectors": {
+        "channel": "stable",
+        "distribution": "go",
+        "stable": "true"
+      },
+      "stable": true,
+      "yanked": false,
+      "deprecated": false,
+      "reason": null,
+      "yanked_reason": null,
+      "notes_url": "https://go.dev/doc/devel/release#go1.22.5",
+      "upstream_version": "go1.22.5",
+      "artifacts": [
+        {
+          "platform": {
+            "os": "macos",
+            "arch": "arm64"
+          },
+          "url": "https://go.dev/dl/go1.22.5.darwin-arm64.tar.gz",
+          "filename": "go1.22.5.darwin-arm64.tar.gz",
+          "archive_type": "tar.gz",
+          "checksum": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "os": "darwin",
+          "arch": "arm64",
+          "kind": "archive",
+          "size": 11,
+          "metadata": {
+            "go_arch": "arm64",
+            "go_os": "darwin",
+            "kind": "archive"
+          }
+        },
+        {
+          "platform": {
+            "os": "linux",
+            "arch": "x64"
+          },
+          "url": "https://go.dev/dl/go1.22.5.linux-amd64.tar.gz",
+          "filename": "go1.22.5.linux-amd64.tar.gz",
+          "archive_type": "tar.gz",
+          "checksum": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "os": "linux",
+          "arch": "amd64",
+          "kind": "archive",
+          "size": 22,
+          "metadata": {
+            "go_arch": "amd64",
+            "go_os": "linux",
+            "kind": "archive"
+          }
+        }
+      ]
+    },
+    {
+      "version": "1.21.0",
+      "normalized_version": "1.21.0",
+      "aliases": [
+        "1",
+        "1.21"
+      ],
+      "release_date": null,
+      "selectors": {
+        "channel": "stable",
+        "distribution": "go",
+        "stable": "false"
+      },
+      "stable": false,
+      "yanked": true,
+      "deprecated": true,
+      "reason": "manual yanked release for generator fixture",
+      "yanked_reason": "manual yanked release for generator fixture",
+      "notes_url": "https://go.dev/doc/devel/release#go1.21.0",
+      "upstream_version": "go1.21.0",
+      "artifacts": [
+        {
+          "platform": {
+            "os": "linux",
+            "arch": "x64"
+          },
+          "url": "https://go.dev/dl/go1.21.0.linux-amd64.tar.gz",
+          "filename": "go1.21.0.linux-amd64.tar.gz",
+          "archive_type": "tar.gz",
+          "checksum": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "checksum_algorithm": "sha256",
+          "installable": true,
+          "install_block_reason": null,
+          "os": "linux",
+          "arch": "amd64",
+          "kind": "archive",
+          "size": 33,
+          "metadata": {
+            "go_arch": "amd64",
+            "go_os": "linux",
+            "kind": "archive"
+          }
+        }
+      ]
+    }
+  ]
+}
