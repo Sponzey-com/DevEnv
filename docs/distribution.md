@@ -150,6 +150,34 @@ scripts/catalog-smoke.sh
 
 Do not make `scripts/catalog-smoke.sh` a required CI gate unless the job is explicitly network-enabled and points at an immutable catalog release or controlled mirror. The normal development and CI loop must remain offline by default.
 
+## Release Version Bump
+
+The product version is owned by `workspace.package.version` in the root `Cargo.toml`. Do not maintain a separate Rust constant for the CLI version. Release packaging, Git tags, Homebrew formula templates, and future npm package manifests should derive from this version.
+
+Prepare a release version:
+
+```sh
+scripts/release-version.sh 0.1.1
+```
+
+By default the script requires a clean worktree, updates `Cargo.toml`, refreshes `Cargo.lock` through `cargo test`, commits `Cargo.toml` and `Cargo.lock` as `Release 0.1.1`, and creates the annotated tag `v0.1.1`.
+
+The script does not push commits or tags. Push the release commit and tag explicitly after review:
+
+```sh
+git push origin HEAD --tags
+```
+
+Useful variants:
+
+```sh
+scripts/release-version.sh 0.1.1 --dry-run
+scripts/release-version.sh 0.1.1 --no-commit
+scripts/release-version.sh 0.1.1 --no-tag
+```
+
+Future npm packaging should read the same Cargo workspace version when generating `@sponzey/devenv` and platform package `package.json` files. Do not hand-edit npm package versions separately.
+
 ## Local Packaging
 
 Package the host target locally:

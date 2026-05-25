@@ -11,11 +11,12 @@ use std::thread;
 #[test]
 fn version_command_prints_binary_name_and_version() {
     let mut cmd = Command::cargo_bin("devenv").expect("devenv binary should build");
+    let expected_version = format!("devenv {}", env!("CARGO_PKG_VERSION"));
 
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("devenv 0.1.0"))
+        .stdout(predicate::str::contains(expected_version))
         .stdout(predicate::str::contains("target="))
         .stdout(predicate::str::contains("profile="))
         .stdout(predicate::str::contains("git="));
