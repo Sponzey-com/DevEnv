@@ -40,6 +40,16 @@ devenv shim rehash
 devenv doctor
 ```
 
+Executable smoke runs only when the package target matches the build host target. Cross-compiled packages such as `aarch64-unknown-linux-gnu` on an `x86_64-unknown-linux-gnu` runner are still unpacked and checked for a non-empty binary, but the binary is not executed by default.
+
+Control release smoke explicitly with:
+
+```sh
+DEVENV_RELEASE_SMOKE=auto scripts/package-release.sh
+DEVENV_RELEASE_SMOKE=1 scripts/package-release.sh
+DEVENV_RELEASE_SMOKE=0 scripts/package-release.sh
+```
+
 The version output includes target, build profile, and git sha:
 
 ```text
@@ -152,7 +162,7 @@ Do not make `scripts/catalog-smoke.sh` a required CI gate unless the job is expl
 
 ## Release Version Bump
 
-The product version is owned by `workspace.package.version` in the root `Cargo.toml`. Do not maintain a separate Rust constant for the CLI version. Release packaging, Git tags, Homebrew formula templates, and future npm package manifests should derive from this version.
+The product version is owned by `workspace.package.version` in the root `Cargo.toml`. Do not maintain a separate Rust constant for the CLI version. Release packaging, Git tags, Homebrew formula templates, and npm package manifests should derive from this version.
 
 Prepare a release version:
 
@@ -176,7 +186,7 @@ scripts/release-version.sh 0.1.1 --no-commit
 scripts/release-version.sh 0.1.1 --no-tag
 ```
 
-Future npm packaging should read the same Cargo workspace version when generating `@sponzey/devenv` and platform package `package.json` files. Do not hand-edit npm package versions separately.
+npm packaging must read the same Cargo workspace version when generating `@sponzey/devenv` and platform package `package.json` files. Do not hand-edit npm package versions separately.
 
 ## Local Packaging
 

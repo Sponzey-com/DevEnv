@@ -15,12 +15,18 @@ if [ -z "$version" ]; then
 fi
 
 target="${DEVENV_RELEASE_TARGET:-}"
+host_target="$(rustc -vV | sed -n 's/^host: //p')"
 if [ -z "$target" ]; then
-    target="$(rustc -vV | sed -n 's/^host: //p')"
+    target="$host_target"
 fi
 
 if [ -z "$target" ]; then
     echo "failed to determine Rust target triple" >&2
+    exit 1
+fi
+
+if [ -z "$host_target" ]; then
+    echo "failed to determine host Rust target triple" >&2
     exit 1
 fi
 
@@ -70,7 +76,33 @@ fi
 
 smoke_root="$(mktemp -d "$out_dir/smoke/$artifact_name.XXXXXX")"
 tar -xzf "$archive" -C "$smoke_root"
-scripts/release-smoke.sh "$smoke_root/$artifact_name/$binary_name"
+smoke_binary="$smoke_root/$artifact_name/$binary_name"
+if [ ! -s "$smoke_binary" ]; then
+    echo "release smoke failed: packaged binary is missing or empty: $smoke_binary" >&2
+    exit 1
+fi
+
+smoke_mode="${DEVENV_RELEASE_SMOKE:-auto}"
+case "$smoke_mode" in
+    auto)
+        if [ "$target" = "$host_target" ]; then
+            scripts/release-smoke.sh "$smoke_binary"
+        else
+            echo "release executable smoke skipped: target=$target host=$host_target"
+        fi
+        ;;
+    1|true|yes)
+        scripts/release-smoke.sh "$smoke_binary"
+        ;;
+    0|false|no)
+        echo "release executable smoke skipped by DEVENV_RELEASE_SMOKE=$smoke_mode"
+        ;;
+    *)
+        echo "invalid DEVENV_RELEASE_SMOKE value: $smoke_mode" >&2
+        echo "expected auto, 1, true, yes, 0, false, or no" >&2
+        exit 64
+        ;;
+esac
 
 echo "$archive"
 echo "$checksum_file"
