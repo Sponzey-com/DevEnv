@@ -1,44 +1,50 @@
 # DevEnv
 
-DevEnv는 여러 개발 런타임과 CLI 도구를 한 프로젝트 안에서 선택, 설치, 활성화하기 위한 Rust 기반 CLI입니다.
+[Korean](README.md.ko)
 
-목표는 `jenv`, `goenv`, `pyenv`, `asdf`, `mise` 계열의 장점을 참고하되, 더 많은 언어와 도구를 장기적으로 확장 가능한 구조로 지원하는 것입니다. 현재 구현은 CLI 중심이며, 서버, GUI, daemon, database, cloud dependency를 요구하지 않습니다.
+DevEnv is a Rust-based CLI for selecting, installing, and activating development runtimes and command-line tools per project.
 
-현재 제품 버전은 root `Cargo.toml`의 `workspace.package.version`을 기준으로 합니다.
+The project takes inspiration from tools such as `jenv`, `goenv`, `pyenv`, `asdf`, and `mise`, while aiming for a broader, extensible provider model across many languages and tools. DevEnv is CLI-first and does not require a server, GUI, daemon, database, or cloud dependency.
+
+The product version is owned by the root `Cargo.toml`:
+
+```text
+Cargo.toml -> [workspace.package] -> version
+```
 
 ## Current Status
 
-DevEnv는 현재 MVP 단계입니다. 핵심 흐름은 동작하지만, 모든 provider가 같은 성숙도를 가진 것은 아닙니다.
+DevEnv is currently in an MVP stage. The core workflow is implemented, but providers do not all have the same maturity level.
 
-지원 중인 기본 워크플로:
+Supported workflows:
 
-- 기존 런타임 등록: `devenv add <tool> <path>`
-- 등록 해제: `devenv remove <tool>@<version>` 또는 `devenv remove <tool> <path>`
-- DevEnv 소유 설치 삭제: `devenv uninstall <tool>@<version>`
-- 설치된/등록된 런타임 조회: `devenv list <tool>`
-- 원격 버전 조회: `devenv list-remote <tool>`
-- 런타임 설치: `devenv install <tool>@<version>`
-- 프로젝트 선택: `devenv local <tool>@<version>`
-- 전역 선택: `devenv global <tool>@<version>`
-- 현재 선택 확인: `devenv current`
-- 활성 환경에서 명령 실행: `devenv exec -- <command>`
-- shim 생성: `devenv shim rehash`
-- 상태 점검: `devenv doctor`
+- Register an existing runtime: `devenv add <tool> <path>`
+- Remove a registered external runtime: `devenv remove <tool>@<version>` or `devenv remove <tool> <path>`
+- Delete a DevEnv-owned install: `devenv uninstall <tool>@<version>`
+- List installed and registered runtimes: `devenv list <tool>`
+- List remote versions: `devenv list-remote <tool>`
+- Install a runtime: `devenv install <tool>@<version>`
+- Select a project version: `devenv local <tool>@<version>`
+- Select a global version: `devenv global <tool>@<version>`
+- Show the current selection: `devenv current`
+- Run a command in an activated environment: `devenv exec -- <command>`
+- Generate shims: `devenv shim rehash`
+- Check local state: `devenv doctor`
 
-Provider 상태:
+Provider status:
 
-| Tool | Provider | Current support |
-| --- | --- | --- |
-| Java | Temurin | Direct install metadata and local registration |
-| Go | Official | Direct install metadata, catalog metadata, local registration |
-| Node.js | Official | Direct install metadata, catalog metadata, local registration |
-| Python | CPython | Fixture-backed direct path and local registration; live provider is deferred |
-| Ruby | Local | Local registration only |
-| PHP | Local | Local registration only |
-| Rust | rustup | Delegated to rustup; DevEnv discovers/registers toolchains |
-| Flutter/Dart | Stable channel | Direct install metadata and local registration |
-| Terraform | HashiCorp | Direct install metadata, catalog path, single-binary install |
-| OpenTofu | OpenTofu | Direct install metadata, single-binary install |
+| Tool         | Provider       | Current support                                                              |
+| ------------ | -------------- | ---------------------------------------------------------------------------- |
+| Java         | Temurin        | Direct install metadata and local registration                               |
+| Go           | Official       | Direct install metadata, catalog metadata, local registration                |
+| Node.js      | Official       | Direct install metadata, catalog metadata, local registration                |
+| Python       | CPython        | Fixture-backed direct path and local registration; live provider is deferred |
+| Ruby         | Local          | Local registration only                                                      |
+| PHP          | Local          | Local registration only                                                      |
+| Rust         | rustup         | Delegated to rustup; DevEnv discovers/registers toolchains                   |
+| Flutter/Dart | Stable channel | Direct install metadata and local registration                               |
+| Terraform    | HashiCorp      | Direct install metadata, catalog path, single-binary install                 |
+| OpenTofu     | OpenTofu       | Direct install metadata, single-binary install                               |
 
 DevEnv reads common project version files where implemented:
 
@@ -117,12 +123,12 @@ devenv list-remote go --refresh
 devenv install go@1.22
 ```
 
-## Metadata And Catalog Status
+## Metadata And Catalog
 
 DevEnv separates metadata refresh from runtime artifact downloads.
 
 - `metadata update` and `list-remote --refresh` fetch small provider metadata.
-- `list-remote --offline` reads fixture overrides or local metadata cache.
+- `list-remote --offline` reads fixture overrides or the local metadata cache.
 - `install` downloads runtime artifacts only after metadata resolution.
 - checksum-bearing artifacts are verified before being promoted into the download cache.
 
@@ -157,7 +163,7 @@ DEVENV_CATALOG_SMOKE=1 DEVENV_CATALOG_SMOKE_BASE_URL=file:///mirror/devenv-metad
 
 ## Distribution
 
-Distribution currently starts with GitHub release artifacts and an organization Homebrew tap. Direct submission to `homebrew/core` is a later goal.
+Distribution currently uses GitHub release artifacts and npm.
 
 ### Release Version
 
@@ -167,7 +173,7 @@ The product version is controlled only by:
 Cargo.toml -> [workspace.package] -> version
 ```
 
-Do not maintain a separate Rust, npm, Homebrew, or documentation version.
+Do not maintain a separate Rust, npm, or documentation version.
 
 Prepare a version bump:
 
@@ -222,36 +228,30 @@ DEVENV_RELEASE_TARGET=aarch64-apple-darwin \
 scripts/package-release.sh
 ```
 
-### Homebrew
-
-Homebrew distribution is expected to start through an organization tap:
-
-```sh
-brew tap <org>/tap
-brew install <org>/tap/devenv
-```
-
-The formula template lives at:
-
-```text
-packaging/homebrew/devenv.rb.template
-```
-
-The formula installs prebuilt GitHub release artifacts, so users do not need Rust installed.
-
 ### npm
 
-npm is an intended distribution channel for DevEnv. The package name is:
+The public npm package name is:
 
 ```text
 @sponzey/devenv
 ```
 
-Package structure:
+The npm package is generated from the Cargo workspace version. Do not hand-edit an npm package version.
 
-- `@sponzey/devenv` as the thin meta package with the `devenv` bin shim;
-- `@sponzey/devenv-darwin-arm64`, `@sponzey/devenv-darwin-x64`, `@sponzey/devenv-linux-x64`, `@sponzey/devenv-linux-arm64`, and `@sponzey/devenv-win32-x64` as platform packages;
-- all npm package versions generated from the Cargo workspace version.
+Generate and smoke-test the package:
+
+```sh
+scripts/npm-smoke.sh
+```
+
+Publish after the matching GitHub release artifacts are available:
+
+```sh
+scripts/package-npm.sh
+npm publish target/npm/@sponzey/devenv --access public
+```
+
+The package installs a small Node.js shim and downloads the matching prebuilt GitHub release artifact during `postinstall`. It verifies the `.tar.gz.sha256` checksum before installing the local `devenv` binary.
 
 User-facing install/update:
 
@@ -259,7 +259,7 @@ User-facing install/update:
 npm install -g @sponzey/devenv@latest
 ```
 
-Implementation status: npm package generation and publish automation still need to be added to the repository. The distribution target itself is not deferred.
+If npm returns `404 Not Found`, the package name has not been published yet or the requested version is not available in the public registry.
 
 ## Development Standards
 

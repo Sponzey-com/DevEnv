@@ -256,3 +256,58 @@ brew test <org>/tap/devenv
 ```
 
 Do not submit to `homebrew/core` until DevEnv has stable releases, public adoption, and a support policy for formula updates.
+
+## npm
+
+The public npm package name is:
+
+```text
+@sponzey/devenv
+```
+
+The npm package is generated from the root Cargo workspace version. Do not keep a separate npm version field in source control. Generate the package with:
+
+```sh
+scripts/package-npm.sh
+```
+
+The generated package lives at:
+
+```text
+target/npm/@sponzey/devenv
+```
+
+Run the offline npm packaging smoke before publishing:
+
+```sh
+scripts/npm-smoke.sh
+```
+
+Publish the package only after the matching GitHub release artifacts are available. The npm `postinstall` script downloads:
+
+```text
+https://github.com/Sponzey-com/DevEnv/releases/download/v<version>/devenv-<version>-<target>.tar.gz
+https://github.com/Sponzey-com/DevEnv/releases/download/v<version>/devenv-<version>-<target>.tar.gz.sha256
+```
+
+Manual publish:
+
+```sh
+scripts/package-npm.sh
+npm publish target/npm/@sponzey/devenv --access public
+```
+
+GitHub Actions publish:
+
+- configure an npm automation token as repository secret `NPM_TOKEN`;
+- push the release tag;
+- the release workflow creates GitHub release assets first, then publishes `@sponzey/devenv`;
+- if `NPM_TOKEN` is absent, npm publish is skipped without failing the release.
+
+User install/update:
+
+```sh
+npm install -g @sponzey/devenv@latest
+```
+
+If npm returns `404 Not Found`, either `@sponzey/devenv` has not been published to the public registry yet, or the requested version does not exist. Publishing a GitHub Release alone does not create an npm package.

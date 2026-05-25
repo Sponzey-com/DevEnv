@@ -1,0 +1,51 @@
+{
+  "name": "@sponzey/devenv",
+  "version": "__DEVENV_VERSION__",
+  "description": "Rust-based multi-language development runtime manager.",
+  "license": "MIT",
+  "homepage": "https://github.com/Sponzey-com/DevEnv#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sponzey-com/DevEnv.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Sponzey-com/DevEnv/issues"
+  },
+  "bin": {
+    "devenv": "bin/devenv.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "keywords": [
+    "devenv",
+    "env",
+    "version-manager",
+    "java",
+    "go",
+    "node",
+    "python",
+    "rust"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

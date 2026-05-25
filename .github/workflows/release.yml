@@ -94,3 +94,20 @@ jobs:
           set -euo pipefail
           files="$(find release-assets -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' -o -name 'SHA256SUMS' \) -print)"
           gh release create "${GITHUB_REF_NAME}" $files --repo "${GITHUB_REPOSITORY}" --verify-tag --title "${GITHUB_REF_NAME}" --notes "DevEnv ${GITHUB_REF_NAME} release artifacts."
+
+      - name: Smoke npm package
+        shell: bash
+        run: scripts/npm-smoke.sh
+
+      - name: Publish npm package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is not configured; skipping npm publish"
+            exit 0
+          fi
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > ~/.npmrc
+          npm publish target/npm/@sponzey/devenv --access public
