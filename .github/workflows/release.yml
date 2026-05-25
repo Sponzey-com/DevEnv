@@ -70,6 +70,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Download packaged artifacts
         uses: actions/download-artifact@v8
@@ -91,4 +93,4 @@ jobs:
         run: |
           set -euo pipefail
           files="$(find release-assets -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' -o -name 'SHA256SUMS' \) -print)"
-          gh release create "${GITHUB_REF_NAME}" $files --verify-tag --title "${GITHUB_REF_NAME}" --notes "DevEnv ${GITHUB_REF_NAME} release artifacts."
+          gh release create "${GITHUB_REF_NAME}" $files --repo "${GITHUB_REPOSITORY}" --verify-tag --title "${GITHUB_REF_NAME}" --notes "DevEnv ${GITHUB_REF_NAME} release artifacts."
