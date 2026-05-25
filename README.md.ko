@@ -6,7 +6,7 @@ DevEnv는 여러 개발 런타임과 CLI 도구를 프로젝트 단위로 선택
 
 목표는 `jenv`, `goenv`, `pyenv`, `asdf`, `mise` 계열의 장점을 참고하되, 더 많은 언어와 도구를 장기적으로 확장 가능한 provider 모델로 지원하는 것입니다. DevEnv는 CLI 중심이며 서버, GUI, daemon, database, cloud dependency를 요구하지 않습니다.
 
-현재 제품 버전은 `0.1.6`입니다. 단일 기준은 root `Cargo.toml`입니다.
+현재 제품 버전은 `0.1.7`입니다. 단일 기준은 root `Cargo.toml`입니다.
 
 ```text
 Cargo.toml -> [workspace.package] -> version
@@ -252,6 +252,8 @@ npm publish target/npm/@sponzey/devenv --access public
 ```
 
 Release workflow는 장기 `NPM_TOKEN`이 아니라 npm Trusted Publishing을 사용합니다. npm에서 package `@sponzey/devenv`, repository `Sponzey-com/DevEnv`, workflow filename `release.yml`, allowed action `npm publish`로 GitHub Actions trusted publisher를 설정해야 합니다.
+
+첫 publish 전에는 npm의 `sponzey` organization 또는 user scope가 존재하고, publish 계정이 `@sponzey/devenv`를 생성할 권한을 가져야 합니다. `PUT https://registry.npmjs.org/@sponzey%2fdevenv` 단계에서 `E404`가 나오면 package 또는 scope가 publisher에게 보이지 않는 상태입니다. 2FA가 가능한 npm 계정이나 Bypass 2FA가 켜진 granular access token으로 package를 한 번 bootstrap publish한 뒤, 이후 release부터 Trusted Publishing을 사용합니다.
 
 이 package는 작은 Node.js shim을 설치하고 `postinstall` 중 매칭되는 prebuilt GitHub release artifact를 다운로드합니다. 로컬 `devenv` binary를 설치하기 전에 `.tar.gz.sha256` checksum을 검증합니다.
 

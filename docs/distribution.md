@@ -297,6 +297,15 @@ scripts/package-npm.sh
 npm publish target/npm/@sponzey/devenv --access public
 ```
 
+First publish bootstrap:
+
+- create or confirm the npm organization/user scope `sponzey`;
+- confirm the publishing npm account has permission to create packages under `@sponzey`;
+- publish once from an authorized account with 2FA, or use a granular access token with write permission and Bypass 2FA enabled;
+- after the package exists, configure Trusted Publishing in the package settings for future releases.
+
+If npm fails with `E404 Not Found - PUT https://registry.npmjs.org/@sponzey%2fdevenv`, treat it as a scope/package access problem: the npm publisher cannot see or create `@sponzey/devenv`.
+
 GitHub Actions publish:
 
 - configure npm Trusted Publishing for package `@sponzey/devenv`;
