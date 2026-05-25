@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust target
         shell: bash
@@ -54,7 +54,7 @@ jobs:
         run: scripts/package-release.sh
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: devenv-${{ matrix.target }}
           path: |
@@ -68,8 +68,11 @@ jobs:
     needs: build
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
