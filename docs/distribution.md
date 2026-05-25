@@ -294,11 +294,14 @@ Manual publish:
 
 ```sh
 scripts/package-npm.sh
-npm publish target/npm/@sponzey/devenv --access public
+npm login --registry=https://registry.npmjs.org/
+npm publish target/npm/@sponzey/devenv --access public --registry=https://registry.npmjs.org/
 ```
 
 First publish bootstrap:
 
+- use the official npm registry, `https://registry.npmjs.org/`;
+- do not use CNPM, npmmirror, or another mirror for account creation or publish;
 - create or confirm the npm organization/user scope `sponzey`;
 - confirm the publishing npm account has permission to create packages under `@sponzey`;
 - publish once from an authorized account with 2FA, or use a granular access token with write permission and Bypass 2FA enabled;
