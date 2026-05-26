@@ -123,6 +123,15 @@ eval "$(devenv activate zsh)"
 java --version
 ```
 
+새 터미널 세션에도 적용하려면 `devenv local`, `devenv global`, `devenv use`가 출력하는 정확한 activation line을 shell profile에 추가해야 합니다.
+
+```sh
+devenv global java 21
+# 출력되는 "new sessions:" 줄을 ~/.zshrc에 추가합니다.
+```
+
+npm 설치에서는 npm entrypoint가 Node.js wrapper이기 때문에 이 차이가 중요합니다. 출력되는 줄은 native DevEnv binary 경로를 사용하므로 DevEnv shim이 `node`, `npm` 같은 명령까지 안전하게 관리할 수 있습니다.
+
 활성화된 세션에서는 이후 `devenv local`, `devenv global`, `devenv use` 선택이 다음 tool 명령부터 shim에 바로 반영됩니다.
 
 원격 metadata 갱신과 설치:

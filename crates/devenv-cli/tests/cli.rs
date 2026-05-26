@@ -197,13 +197,16 @@ fn local_command_writes_project_devenv_toml() {
         .current_dir(temp.path())
         .env("DEVENV_HOME", &devenv_home)
         .env_remove("DEVENV_GLOBAL_CONFIG")
+        .env("SHELL", "/bin/zsh")
         .arg("local")
         .arg("java")
         .arg("17")
         .assert()
         .success()
         .stdout(predicate::str::contains("java 17 local"))
-        .stdout(predicate::str::contains("devenv activate"));
+        .stdout(predicate::str::contains("activate zsh"))
+        .stdout(predicate::str::contains("new sessions"))
+        .stdout(predicate::str::contains("~/.zshrc"));
 
     let contents =
         fs::read_to_string(temp.path().join("devenv.toml")).expect("config should be readable");
@@ -570,10 +573,12 @@ fn tool_versions_file_selects_rust_version() {
 #[test]
 fn missing_current_selection_reports_actionable_error() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
 
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
         .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
         .env_remove("DEVENV_GLOBAL_CONFIG")
         .env_remove("DEVENV_TOOL_JAVA")
         .arg("current")
@@ -3150,6 +3155,14 @@ fn shim_init_creates_shims_without_mutating_shell_profiles() {
         fs::read_to_string(&profile).expect("profile should be readable"),
         "existing profile\n"
     );
+
+    let node_shim =
+        fs::read_to_string(devenv_home.join("shims/node")).expect("node shim should be readable");
+    assert!(node_shim.contains("shim dispatch"));
+    assert!(
+        !node_shim.contains("exec 'devenv' shim dispatch"),
+        "shims must call the native executable path, not resolve `devenv` through PATH"
+    );
 }
 
 #[test]
@@ -3221,7 +3234,8 @@ fn activate_renders_shell_scripts_without_writing_profiles() {
         .success()
         .stdout(predicate::str::contains("export DEVENV_HOME="))
         .stdout(predicate::str::contains("shims"))
-        .stdout(predicate::str::contains("PATH"));
+        .stdout(predicate::str::contains("PATH"))
+        .stdout(predicate::str::contains("devenv()"));
 
     assert!(
         devenv_home.join("shims/java").is_file(),
@@ -3242,7 +3256,8 @@ fn activate_renders_shell_scripts_without_writing_profiles() {
         .assert()
         .success()
         .stdout(predicate::str::contains("export DEVENV_HOME="))
-        .stdout(predicate::str::contains("shims"));
+        .stdout(predicate::str::contains("shims"))
+        .stdout(predicate::str::contains("devenv()"));
 
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
@@ -3253,7 +3268,8 @@ fn activate_renders_shell_scripts_without_writing_profiles() {
         .assert()
         .success()
         .stdout(predicate::str::contains("set -gx DEVENV_HOME"))
-        .stdout(predicate::str::contains("set -gx PATH"));
+        .stdout(predicate::str::contains("set -gx PATH"))
+        .stdout(predicate::str::contains("function devenv"));
 
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
@@ -3264,7 +3280,8 @@ fn activate_renders_shell_scripts_without_writing_profiles() {
         .assert()
         .success()
         .stdout(predicate::str::contains("$env:DEVENV_HOME"))
-        .stdout(predicate::str::contains("$env:PATH"));
+        .stdout(predicate::str::contains("$env:PATH"))
+        .stdout(predicate::str::contains("function devenv"));
 }
 
 #[test]

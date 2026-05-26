@@ -466,6 +466,15 @@ eval "$(devenv activate zsh)"
 eval "$(devenv activate bash)"
 ```
 
+For new terminal sessions, add the activation line to your shell profile:
+
+```sh
+devenv global java 21
+# Copy the printed "new sessions:" line into ~/.zshrc.
+```
+
+Use the exact line printed by DevEnv. For npm installs, that line points at the native DevEnv binary inside the npm package. This avoids routing `devenv` through the Node.js wrapper after DevEnv has put `node` and `npm` shims at the front of `PATH`.
+
 Fish:
 
 ```fish

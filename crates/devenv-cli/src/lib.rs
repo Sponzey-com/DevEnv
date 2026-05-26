@@ -451,9 +451,11 @@ Example:
 
 Prints shell activation that sets DEVENV_HOME and prepends the shim directory.
 Activation also generates DevEnv shims, so direct commands such as `java --version` use the current DevEnv selection after eval.
+For new terminal sessions, add the exact "new sessions:" line printed by selection commands such as `devenv global` to your shell profile.
 
 Example:
-  eval "$(devenv activate zsh)""#,
+  eval "$(devenv activate zsh)"
+  # For new zsh sessions, use the line printed by `devenv global <tool> <version>`"#,
         ),
         "shim" => Some(
             r#"Usage: devenv shim <init|rehash|dispatch>
@@ -779,7 +781,8 @@ fn run_shim_rehash(context: &CommandContext) -> Result<(PathBuf, usize), CliErro
     let adapters = builtin_shim_adapters();
     let adapter_refs = adapter_refs(&adapters);
     let shim_dir = home.shims_dir();
-    let mut writer = FileShimWriter::new(&shim_dir);
+    let mut writer =
+        FileShimWriter::new(&shim_dir).with_dispatch_command(current_executable_command());
     let specs = rehash_shims(&adapter_refs, &mut writer)?;
 
     Ok((shim_dir, specs.len()))
@@ -3570,12 +3573,18 @@ where
     let syntax = parse_shell_syntax(&args[0])?;
     let home = DevEnvHome::resolve_from_env(&context.env_vars)?;
     let _ = run_shim_rehash(context)?;
+    let devenv_command = current_executable_command();
     let plan = ActivationPlan::new()
         .set_env("DEVENV_HOME", home.root().to_string_lossy())
         .prepend_path(home.shims_dir());
     let renderer = ShellActivationRenderer::new(syntax);
 
     writeln!(stdout, "{}", renderer.render(&plan)?)?;
+    writeln!(
+        stdout,
+        "{}",
+        render_devenv_shell_function(syntax, &devenv_command)
+    )?;
     Ok(())
 }
 
@@ -5278,6 +5287,29 @@ fn read_global_config(context: &CommandContext) -> Result<Option<ProjectConfig>,
     read_devenv_toml_config(&path, ConfigScope::Global).map_err(Into::into)
 }
 
+fn current_executable_command() -> String {
+    std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| COMMAND_NAME.to_owned())
+}
+
+fn render_devenv_shell_function(syntax: ShellSyntax, command: &str) -> String {
+    match syntax {
+        ShellSyntax::Bash | ShellSyntax::Zsh | ShellSyntax::Posix => {
+            format!("devenv() {{\n  {} \"$@\"\n}}", shell_quote(command))
+        }
+        ShellSyntax::Fish => {
+            format!("function devenv\n  {} $argv\nend", shell_quote(command))
+        }
+        ShellSyntax::PowerShell => {
+            format!(
+                "function devenv {{ & {} @args }}",
+                powershell_quote(command)
+            )
+        }
+    }
+}
+
 fn resolve_global_config_path(context: &CommandContext) -> Result<PathBuf, CliError> {
     if let Some(path) = &context.global_config_path {
         return Ok(path.clone());
@@ -5321,10 +5353,16 @@ where
         }
     }
 
+    let guidance = activation_guidance(context);
     writeln!(
         stdout,
-        "next: run `{}` once so tool commands use DevEnv selections in this shell.",
-        activation_hint(context)
+        "next: run `{}` so tool commands use DevEnv selections in this shell.",
+        guidance.current_shell
+    )?;
+    writeln!(
+        stdout,
+        "new sessions: add `{}` to `{}`.",
+        guidance.profile_line, guidance.profile_file
     )?;
     Ok(())
 }
@@ -5335,7 +5373,15 @@ fn path_contains_dir(path: Option<&String>, directory: &Path) -> bool {
         .any(|entry| entry == directory)
 }
 
-fn activation_hint(context: &CommandContext) -> &'static str {
+#[derive(Debug, Clone)]
+struct ActivationGuidance {
+    current_shell: String,
+    profile_line: String,
+    profile_file: &'static str,
+}
+
+fn activation_guidance(context: &CommandContext) -> ActivationGuidance {
+    let command = shell_quote(&current_executable_command());
     let shell = context
         .env_vars
         .get("SHELL")
@@ -5344,9 +5390,21 @@ fn activation_hint(context: &CommandContext) -> &'static str {
         .unwrap_or("zsh");
 
     match shell {
-        "bash" => "eval \"$(devenv activate bash)\"",
-        "fish" => "devenv activate fish | source",
-        _ => "eval \"$(devenv activate zsh)\"",
+        "bash" => ActivationGuidance {
+            current_shell: format!("eval \"$({command} activate bash)\""),
+            profile_line: format!("eval \"$({command} activate bash)\""),
+            profile_file: "~/.bashrc",
+        },
+        "fish" => ActivationGuidance {
+            current_shell: format!("{command} activate fish | source"),
+            profile_line: format!("{command} activate fish | source"),
+            profile_file: "~/.config/fish/config.fish",
+        },
+        _ => ActivationGuidance {
+            current_shell: format!("eval \"$({command} activate zsh)\""),
+            profile_line: format!("eval \"$({command} activate zsh)\""),
+            profile_file: "~/.zshrc",
+        },
     }
 }
 
@@ -8239,6 +8297,10 @@ fn shell_env_key(tool: &ToolName) -> String {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn missing_selection_error(tool: &ToolName) -> CliError {

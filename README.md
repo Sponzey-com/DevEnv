@@ -123,6 +123,15 @@ eval "$(devenv activate zsh)"
 java --version
 ```
 
+For new terminal sessions, add the exact activation line printed by `devenv local`, `devenv global`, or `devenv use` to your shell profile:
+
+```sh
+devenv global java 21
+# Then copy the printed "new sessions:" line into ~/.zshrc.
+```
+
+This matters for npm installs because the npm entrypoint is a Node.js wrapper. The generated line uses the native DevEnv binary path so DevEnv shims can safely manage `node`, `npm`, and other commands.
+
 After activation, `devenv local`, `devenv global`, and `devenv use` selections are picked up by the shims for subsequent tool commands in that shell.
 
 Refresh remote metadata and install:
