@@ -1669,6 +1669,42 @@ fn list_remote_python_uses_fixture_release_metadata() {
 }
 
 #[test]
+fn list_remote_uses_manifest_known_versions_for_seeded_tools() {
+    for (tool, suffix, manifest) in [
+        (
+            "python",
+            "cpython",
+            include_str!("../../../metadata/providers/python/cpython/manifest.json"),
+        ),
+        (
+            "rust",
+            "rustup",
+            include_str!("../../../metadata/providers/rust/rustup/manifest.json"),
+        ),
+        (
+            "ruby",
+            "local",
+            include_str!("../../../metadata/providers/ruby/local/manifest.json"),
+        ),
+        (
+            "php",
+            "local",
+            include_str!("../../../metadata/providers/php/local/manifest.json"),
+        ),
+    ] {
+        let expected = format!("{tool} {} {suffix}", first_known_manifest_version(manifest));
+        Command::cargo_bin("devenv")
+            .expect("devenv binary should build")
+            .arg("list-remote")
+            .arg(tool)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(expected))
+            .stderr(predicate::str::is_empty());
+    }
+}
+
+#[test]
 fn list_remote_java_uses_fixture_temurin_metadata() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let archive = write_fake_java_archive(temp.path());
@@ -1708,6 +1744,60 @@ fn list_remote_java_uses_temurin_api_fixture_metadata() {
         .success()
         .stdout(predicate::str::contains("java 21 temurin"))
         .stdout(predicate::str::contains("java 21.0.2 temurin"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn list_remote_java_reads_provider_manifest_metadata_when_cache_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let base_url = serve_java_temurin_manifest_metadata();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_JAVA_TEMURIN_API_BASE_URL", base_url)
+        .arg("list-remote")
+        .arg("java")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("java 21 temurin"))
+        .stdout(predicate::str::contains("java 21.0.2 temurin"))
+        .stdout(predicate::str::contains("java 17 temurin"))
+        .stdout(predicate::str::contains("java 17.0.11 temurin"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .arg("list-remote")
+        .arg("java")
+        .arg("--offline")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("java 21.0.2 temurin"))
+        .stdout(predicate::str::contains("java 17.0.11 temurin"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn list_remote_java_uses_manifest_known_features_when_release_index_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let base_url = serve_java_temurin_manifest_feature_metadata_without_available_index();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", temp.path().join("devenv-home"))
+        .env("DEVENV_JAVA_TEMURIN_API_BASE_URL", base_url)
+        .arg("list-remote")
+        .arg("java")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("java 21.0.2 temurin"))
+        .stdout(predicate::str::contains("java 17.0.11 temurin"))
         .stderr(predicate::str::is_empty());
 }
 
@@ -3481,6 +3571,30 @@ fn install_java_dry_run_prints_temurin_plan_without_writing_install_or_download_
 }
 
 #[test]
+fn install_java_dry_run_reads_provider_manifest_metadata_when_cache_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let base_url = serve_java_temurin_manifest_metadata();
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_JAVA_TEMURIN_API_BASE_URL", base_url)
+        .arg("install")
+        .arg("java@21")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Install plan"))
+        .stdout(predicate::str::contains("tool java"))
+        .stdout(predicate::str::contains("requested java@21"))
+        .stdout(predicate::str::contains("resolved 21.0.2-temurin"))
+        .stdout(predicate::str::contains("provider temurin"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
 fn install_go_from_cached_official_metadata_resolves_requested_minor() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
@@ -4916,10 +5030,14 @@ fn serve_flutter_official_metadata() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
     let address = listener.local_addr().expect("server address should exist");
     thread::spawn(move || {
-        for _ in 0..3 {
-            let (mut stream, _) = listener.accept().expect("request should arrive");
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                continue;
+            };
             let mut request = [0_u8; 2048];
-            let read = stream.read(&mut request).expect("request should read");
+            let Ok(read) = stream.read(&mut request) else {
+                continue;
+            };
             let request = String::from_utf8_lossy(&request[..read]);
             let path = request
                 .lines()
@@ -4932,12 +5050,11 @@ fn serve_flutter_official_metadata() -> String {
                 "/releases_windows.json" => (200, "OK", flutter_official_windows_fixture_body()),
                 _ => (404, "Not Found", "not found"),
             };
-            write!(
+            let _ = write!(
                 stream,
-                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.0 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )
-            .expect("response should write");
+            );
         }
     });
     format!("http://{address}")
@@ -5394,6 +5511,142 @@ fn write_java_temurin_release_metadata_fixture(parent: &Path, archive: &Path) ->
     metadata
 }
 
+fn serve_java_temurin_manifest_metadata() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+    let address = listener.local_addr().expect("server address should exist");
+    thread::spawn(move || {
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                continue;
+            };
+            let mut request = [0_u8; 2048];
+            let Ok(read) = stream.read(&mut request) else {
+                continue;
+            };
+            let request = String::from_utf8_lossy(&request[..read]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let (status, reason, body) = if path == "/v3/info/available_releases" {
+                (200, "OK", r#"{"available_releases":[21,17]}"#.to_owned())
+            } else if path
+                == "/v3/assets/feature_releases/21/ga?image_type=jdk&project=jdk&page=0&page_size=20"
+            {
+                (
+                    200,
+                    "OK",
+                    java_temurin_manifest_feature_body(21, "21.0.2+13"),
+                )
+            } else if path
+                == "/v3/assets/feature_releases/17/ga?image_type=jdk&project=jdk&page=0&page_size=20"
+            {
+                (
+                    200,
+                    "OK",
+                    java_temurin_manifest_feature_body(17, "17.0.11+9"),
+                )
+            } else if path.starts_with("/v3/assets/feature_releases/") {
+                (200, "OK", "[]".to_owned())
+            } else {
+                (404, "Not Found", "not found".to_owned())
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.0 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{address}")
+}
+
+fn serve_java_temurin_manifest_feature_metadata_without_available_index() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+    let address = listener.local_addr().expect("server address should exist");
+    thread::spawn(move || {
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                continue;
+            };
+            let mut request = [0_u8; 2048];
+            let Ok(read) = stream.read(&mut request) else {
+                continue;
+            };
+            let request = String::from_utf8_lossy(&request[..read]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let (status, reason, body) = if path == "/v3/info/available_releases" {
+                (404, "Not Found", "not found".to_owned())
+            } else if path
+                == "/v3/assets/feature_releases/21/ga?image_type=jdk&project=jdk&page=0&page_size=20"
+            {
+                (
+                    200,
+                    "OK",
+                    java_temurin_manifest_feature_body(21, "21.0.2+13"),
+                )
+            } else if path
+                == "/v3/assets/feature_releases/17/ga?image_type=jdk&project=jdk&page=0&page_size=20"
+            {
+                (
+                    200,
+                    "OK",
+                    java_temurin_manifest_feature_body(17, "17.0.11+9"),
+                )
+            } else if path.starts_with("/v3/assets/feature_releases/") {
+                (200, "OK", "[]".to_owned())
+            } else {
+                (404, "Not Found", "not found".to_owned())
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.0 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{address}")
+}
+
+fn java_temurin_manifest_feature_body(major: u32, version: &str) -> String {
+    let (api_os, api_arch, filename_os, filename_arch, extension) =
+        current_temurin_platform_for_test();
+    let filename_version = version.replace('+', "_").replace('.', ".");
+    format!(
+        r#"
+[
+  {{
+    "release_name": "jdk-{version}",
+    "release_type": "ga",
+    "version_data": {{
+      "major": {major},
+      "openjdk_version": "{version}",
+      "semver": "{version}"
+    }},
+    "binaries": [
+      {{
+        "architecture": "{api_arch}",
+        "os": "{api_os}",
+        "image_type": "jdk",
+        "package": {{
+          "name": "OpenJDK{major}U-jdk_{filename_arch}_{filename_os}_hotspot_{filename_version}.{extension}",
+          "link": "https://example.test/temurin/OpenJDK{major}U-jdk_{filename_arch}_{filename_os}_hotspot_{filename_version}.{extension}",
+          "checksum": "c3718be02942e7077e764bc77d2775235613c9a59935ed767b3ca7448dfde068",
+          "size": 50
+        }}
+      }}
+    ]
+  }}
+]
+"#
+    )
+}
+
 fn find_single_install_root(devenv_home: &Path, tool: &str, version: &str) -> PathBuf {
     let version_dir = devenv_home.join("installs").join(tool).join(version);
     let entries = fs::read_dir(&version_dir)
@@ -5504,6 +5757,22 @@ fn alternate_iac_catalog_platform_for_test() -> (&'static str, &'static str, &'s
     } else {
         ("linux", "amd64", "terraform")
     }
+}
+
+fn first_known_manifest_version(manifest: &str) -> String {
+    let manifest: Value =
+        serde_json::from_str(manifest).expect("provider manifest should parse as JSON");
+    manifest
+        .get("version")
+        .and_then(Value::as_object)
+        .and_then(|version| version.get("known_versions"))
+        .and_then(Value::as_object)
+        .and_then(|known_versions| known_versions.get("versions"))
+        .and_then(Value::as_array)
+        .and_then(|versions| versions.first())
+        .and_then(Value::as_str)
+        .expect("provider manifest should include at least one known version")
+        .to_owned()
 }
 
 fn current_temurin_platform_for_test() -> (

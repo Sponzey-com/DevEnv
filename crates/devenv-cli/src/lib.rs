@@ -23,14 +23,15 @@ use devenv_core::{
     CatalogPayloadKind, CatalogTrustFailure, CatalogTrustVerifier, CatalogVerificationResult,
     Clock, ConfigRepository, ConfigScope, CoreError, ExecCommand, InMemoryLockManager,
     InstallRuntimePorts, InstallRuntimeRequest, MetadataCache, MetadataCacheEntry,
-    MetadataCacheKey, MetadataCacheStatus, MetadataFetchOutcome, MetadataPayloadFetchRequest,
-    MetadataPayloadKind, OperatingSystem, Platform, ProjectConfig, ProviderCapability, ProviderId,
-    ProviderSelectorDimension, RegisteredRuntime, SelectionCandidate, SelectionSource,
-    SupportLevel, ToolAdapter, ToolName, ToolSpec, TrustRoot, Version, VersionMatcher,
-    VersionRequirement, VersionSource, activation_plan_for_selected_runtime, add_external_runtime,
-    collect_shim_specs, dispatch_shim_command, fetch_metadata_payload, install_runtime,
-    list_remote_versions, plan_install_runtime, rehash_shims, remove_external_runtime,
-    resolve_tool_selection, tool_for_shim_binary, uninstall_runtime,
+    MetadataCacheKey, MetadataCacheStatus, MetadataFetchOutcome, MetadataHttpClient,
+    MetadataHttpRequest, MetadataPayloadFetchRequest, MetadataPayloadKind, OperatingSystem,
+    Platform, ProjectConfig, ProviderCapability, ProviderId, ProviderSelectorDimension,
+    RegisteredRuntime, SelectionCandidate, SelectionSource, SupportLevel, ToolAdapter, ToolName,
+    ToolSpec, TrustRoot, Version, VersionMatcher, VersionRequirement, VersionSource,
+    activation_plan_for_selected_runtime, add_external_runtime, collect_shim_specs,
+    dispatch_shim_command, fetch_metadata_payload, install_runtime, list_remote_versions,
+    plan_install_runtime, rehash_shims, remove_external_runtime, resolve_tool_selection,
+    tool_for_shim_binary, uninstall_runtime,
 };
 use devenv_tools::{
     FLUTTER_OFFICIAL_BASE_URL, FLUTTER_OFFICIAL_LINUX_RELEASES_URL,
@@ -43,10 +44,10 @@ use devenv_tools::{
     GoRuntimeDiscovery, GoRuntimeSource, GoToolAdapter, GoVersionMatcher, IacArtifactResolver,
     IacCatalogReleaseMetadata, IacOfficialReleaseMetadata, IacReleaseMetadata,
     IacReleaseVersionSource, IacRuntime, IacRuntimeDiscovery, IacRuntimeSource, IacTool,
-    IacVersionMatcher, JAVA_TEMURIN_METADATA_URL_HINT, JavaArtifactResolver, JavaDistribution,
-    JavaInstalledRuntimeValidator, JavaReleaseMetadata, JavaReleaseVersionSource, JavaRuntime,
-    JavaRuntimeDiscovery, JavaRuntimeSource, JavaTemurinReleaseMetadata, JavaToolAdapter,
-    JavaVersionMatcher, NODE_OFFICIAL_DIST_BASE_URL, NODE_OFFICIAL_INDEX_URL, NodeArtifactResolver,
+    IacVersionMatcher, JavaArtifactResolver, JavaDistribution, JavaInstalledRuntimeValidator,
+    JavaReleaseMetadata, JavaReleaseVersionSource, JavaRuntime, JavaRuntimeDiscovery,
+    JavaRuntimeSource, JavaTemurinReleaseMetadata, JavaToolAdapter, JavaVersionMatcher,
+    NODE_OFFICIAL_DIST_BASE_URL, NODE_OFFICIAL_INDEX_URL, NodeArtifactResolver,
     NodeCatalogReleaseMetadata, NodeInstalledRuntimeValidator, NodeOfficialReleaseMetadata,
     NodeReleaseMetadata, NodeReleaseVersionSource, NodeRuntime, NodeRuntimeDiscovery,
     NodeRuntimeSource, NodeToolAdapter, NodeVersionMatcher, OPENTOFU_OFFICIAL_BASE_URL,
@@ -97,6 +98,8 @@ const OPENTOFU_OFFICIAL_SHA256SUMS_DIR_ENV: &str = "DEVENV_OPENTOFU_OFFICIAL_SHA
 const OPENTOFU_OFFICIAL_BASE_URL_ENV: &str = "DEVENV_OPENTOFU_OFFICIAL_BASE_URL";
 const JAVA_RELEASE_METADATA_ENV: &str = "DEVENV_JAVA_RELEASE_METADATA";
 const JAVA_TEMURIN_RELEASE_METADATA_ENV: &str = "DEVENV_JAVA_TEMURIN_RELEASE_METADATA";
+const JAVA_TEMURIN_API_BASE_URL_ENV: &str = "DEVENV_JAVA_TEMURIN_API_BASE_URL";
+const JAVA_TEMURIN_FEATURE_RELEASE_PAGE_LIMIT: u32 = 100;
 const NODE_RELEASE_METADATA_ENV: &str = "DEVENV_NODE_RELEASE_METADATA";
 const NODE_OFFICIAL_RELEASE_INDEX_ENV: &str = "DEVENV_NODE_OFFICIAL_RELEASE_INDEX";
 const NODE_OFFICIAL_SHASUMS_DIR_ENV: &str = "DEVENV_NODE_OFFICIAL_SHASUMS_DIR";
@@ -1119,16 +1122,11 @@ where
     let tool = ToolName::new(tool_arg).map_err(CoreError::from)?;
     match tool.as_str() {
         "java" => {
-            if options.refresh || options.offline {
-                return Err(CliError::runtime(format!(
-                    "`devenv list-remote {tool}` does not support --refresh or --offline yet"
-                )));
-            }
             reject_flutter_channel_option_for_tool(&tool, options.channel.as_deref())?;
             let distribution = java_distribution_from_option(options.distribution.as_deref())?;
             ensure_supported_java_distribution(&distribution)?;
             let source = JavaReleaseVersionSource::with_distribution(
-                load_java_release_metadata_for_distribution(context, &distribution)?,
+                load_java_release_metadata_with_options(context, &distribution, options)?,
                 distribution,
             );
             write_remote_versions(&tool, &source, Some(source.distribution().as_str()), stdout)
@@ -1176,9 +1174,50 @@ where
             write_remote_versions(&tool, &source, None, stdout)
         }
         "python" => {
-            reject_list_remote_options_for_fixture_tool(&tool, options)?;
-            let source = PythonReleaseVersionSource::new(load_python_release_metadata(context)?);
-            write_remote_versions(&tool, &source, Some("cpython"), stdout)
+            reject_java_distribution_option_for_tool(&tool, options.distribution.as_deref())?;
+            reject_flutter_channel_option_for_tool(&tool, options.channel.as_deref())?;
+            if context.env_vars.contains_key(PYTHON_RELEASE_METADATA_ENV) {
+                let source =
+                    PythonReleaseVersionSource::new(load_python_release_metadata(context)?);
+                write_remote_versions(&tool, &source, Some("cpython"), stdout)
+            } else {
+                write_manifest_known_remote_versions(
+                    &tool,
+                    include_str!("../../../metadata/providers/python/cpython/manifest.json"),
+                    Some("cpython"),
+                    stdout,
+                )
+            }
+        }
+        "rust" => {
+            reject_java_distribution_option_for_tool(&tool, options.distribution.as_deref())?;
+            reject_flutter_channel_option_for_tool(&tool, options.channel.as_deref())?;
+            write_manifest_known_remote_versions(
+                &tool,
+                include_str!("../../../metadata/providers/rust/rustup/manifest.json"),
+                Some("rustup"),
+                stdout,
+            )
+        }
+        "ruby" => {
+            reject_java_distribution_option_for_tool(&tool, options.distribution.as_deref())?;
+            reject_flutter_channel_option_for_tool(&tool, options.channel.as_deref())?;
+            write_manifest_known_remote_versions(
+                &tool,
+                include_str!("../../../metadata/providers/ruby/local/manifest.json"),
+                Some("local"),
+                stdout,
+            )
+        }
+        "php" => {
+            reject_java_distribution_option_for_tool(&tool, options.distribution.as_deref())?;
+            reject_flutter_channel_option_for_tool(&tool, options.channel.as_deref())?;
+            write_manifest_known_remote_versions(
+                &tool,
+                include_str!("../../../metadata/providers/php/local/manifest.json"),
+                Some("local"),
+                stdout,
+            )
         }
         _ => Err(unsupported_list_remote_error(&tool)),
     }
@@ -1265,20 +1304,6 @@ fn parse_list_remote_args(args: &[String]) -> Result<(&str, ListRemoteOptions), 
     };
 
     Ok((tool, options))
-}
-
-fn reject_list_remote_options_for_fixture_tool(
-    tool: &ToolName,
-    options: ListRemoteOptions,
-) -> Result<(), CliError> {
-    if options.refresh || options.offline {
-        return Err(CliError::runtime(format!(
-            "`devenv list-remote {tool}` does not support --refresh or --offline yet"
-        )));
-    }
-    reject_java_distribution_option_for_tool(tool, options.distribution.as_deref())?;
-    reject_flutter_channel_option_for_tool(tool, options.channel.as_deref())?;
-    Ok(())
 }
 
 fn reject_java_distribution_option_for_tool(
@@ -1382,6 +1407,55 @@ where
             writeln!(stdout, "{tool} {version}")?;
         }
     }
+    Ok(())
+}
+
+fn write_manifest_known_remote_versions<O>(
+    tool: &ToolName,
+    manifest_json: &str,
+    suffix: Option<&str>,
+    stdout: &mut O,
+) -> Result<(), CliError>
+where
+    O: Write,
+{
+    let manifest = serde_json::from_str::<serde_json::Value>(manifest_json).map_err(|error| {
+        CliError::runtime(format!(
+            "failed to parse built-in provider manifest for {tool}: {error}"
+        ))
+    })?;
+    let versions = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|version| version.get("known_versions"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|known_versions| known_versions.get("versions"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            CliError::runtime(format!(
+                "provider manifest for {tool} does not contain `version.known_versions.versions`"
+            ))
+        })?;
+
+    if versions.is_empty() {
+        return Err(CliError::runtime(format!(
+            "provider manifest for {tool} does not contain any known versions"
+        )));
+    }
+
+    for version in versions {
+        let version = version.as_str().ok_or_else(|| {
+            CliError::runtime(format!(
+                "provider manifest for {tool} contains a non-string known version"
+            ))
+        })?;
+        if let Some(suffix) = suffix {
+            writeln!(stdout, "{tool} {version} {suffix}")?;
+        } else {
+            writeln!(stdout, "{tool} {version}")?;
+        }
+    }
+
     Ok(())
 }
 
@@ -2613,14 +2687,14 @@ fn update_metadata_provider(
                 source_mode,
             );
         }
-        if capability.tool().as_str() == "java"
-            && capability.provider().as_str() == "temurin"
-            && context
-                .env_vars
-                .contains_key(JAVA_TEMURIN_RELEASE_METADATA_ENV)
-        {
-            refresh_java_temurin_metadata_from_fixture(cache, clock, context)?;
-            return Ok(MetadataUpdateOutcome::Updated);
+        if capability.tool().as_str() == "java" && capability.provider().as_str() == "temurin" {
+            return update_java_temurin_metadata_provider(
+                cache,
+                clock,
+                context,
+                allow_live_fetch,
+                source_mode,
+            );
         }
         if capability.tool().as_str() == "flutter"
             && capability.provider().as_str() == "stable"
@@ -2674,6 +2748,61 @@ fn update_metadata_provider(
 
     cache.write_metadata(entry)?;
     Ok(MetadataUpdateOutcome::Updated)
+}
+
+fn update_java_temurin_metadata_provider(
+    cache: &mut FileMetadataCache,
+    clock: &dyn Clock,
+    context: &CommandContext,
+    allow_live_fetch: bool,
+    source_mode: MetadataSourceMode,
+) -> Result<MetadataUpdateOutcome, CliError> {
+    match source_mode {
+        MetadataSourceMode::Env => Ok(MetadataUpdateOutcome::Skipped(format!(
+            "missing {}; env source was explicitly requested",
+            JAVA_RELEASE_METADATA_ENV
+        ))),
+        MetadataSourceMode::Cache => Ok(MetadataUpdateOutcome::Skipped(
+            "cache source cannot refresh provider metadata".to_owned(),
+        )),
+        MetadataSourceMode::Catalog => Ok(MetadataUpdateOutcome::Skipped(
+            "catalog source is not implemented for java/temurin yet".to_owned(),
+        )),
+        MetadataSourceMode::Official => {
+            if context
+                .env_vars
+                .contains_key(JAVA_TEMURIN_RELEASE_METADATA_ENV)
+            {
+                refresh_java_temurin_metadata_from_fixture(cache, clock, context)?;
+                Ok(MetadataUpdateOutcome::Updated)
+            } else if allow_live_fetch {
+                refresh_java_temurin_metadata_from_provider_manifest(cache, clock, context)?;
+                Ok(MetadataUpdateOutcome::Updated)
+            } else {
+                Ok(MetadataUpdateOutcome::Skipped(format!(
+                    "missing {}; live HTTP refresh is not enabled in this context",
+                    JAVA_TEMURIN_RELEASE_METADATA_ENV
+                )))
+            }
+        }
+        MetadataSourceMode::Auto => {
+            if context
+                .env_vars
+                .contains_key(JAVA_TEMURIN_RELEASE_METADATA_ENV)
+            {
+                refresh_java_temurin_metadata_from_fixture(cache, clock, context)?;
+                return Ok(MetadataUpdateOutcome::Updated);
+            }
+            if allow_live_fetch {
+                refresh_java_temurin_metadata_from_provider_manifest(cache, clock, context)?;
+                return Ok(MetadataUpdateOutcome::Updated);
+            }
+            Ok(MetadataUpdateOutcome::Skipped(format!(
+                "missing {}; live HTTP refresh is not enabled in this context",
+                JAVA_TEMURIN_RELEASE_METADATA_ENV
+            )))
+        }
+    }
 }
 
 fn update_go_metadata_provider(
@@ -6736,6 +6865,14 @@ fn load_java_release_metadata_for_distribution(
     context: &CommandContext,
     distribution: &JavaDistribution,
 ) -> Result<JavaReleaseMetadata, CliError> {
+    load_java_release_metadata_with_options(context, distribution, ListRemoteOptions::default())
+}
+
+fn load_java_release_metadata_with_options(
+    context: &CommandContext,
+    distribution: &JavaDistribution,
+    options: ListRemoteOptions,
+) -> Result<JavaReleaseMetadata, CliError> {
     ensure_supported_java_distribution(distribution)?;
 
     if context.env_vars.contains_key(JAVA_RELEASE_METADATA_ENV) {
@@ -6750,8 +6887,16 @@ fn load_java_release_metadata_for_distribution(
     let mut cache = FileMetadataCache::at_home(&home);
     let key = java_temurin_metadata_cache_key();
 
-    if let Some(entry) = cache.read_metadata(&key)? {
-        return parse_cached_java_release_metadata(entry.payload());
+    if !options.refresh {
+        if let Some(entry) = cache.read_metadata(&key)? {
+            return parse_cached_java_release_metadata(entry.payload());
+        }
+    }
+
+    if options.offline {
+        return Err(CliError::runtime(format!(
+            "Java Temurin metadata cache is missing and offline mode is enabled. Set `{JAVA_RELEASE_METADATA_ENV}`, run `devenv list-remote java --refresh`, or run `devenv metadata update java` before using `--offline`."
+        )));
     }
 
     if context
@@ -6763,9 +6908,9 @@ fn load_java_release_metadata_for_distribution(
         return parse_java_temurin_release_metadata(&loaded.contents);
     }
 
-    Err(CliError::runtime(format!(
-        "Java Temurin metadata is not configured. Set `{JAVA_RELEASE_METADATA_ENV}` to a fixture TOML file, set `{JAVA_TEMURIN_RELEASE_METADATA_ENV}` to a Temurin API JSON fixture, or run `devenv metadata update java` after configuring one of those sources. Live Temurin HTTP refresh is not implemented yet; endpoint hint: {JAVA_TEMURIN_METADATA_URL_HINT}."
-    )))
+    let clock = SystemClock;
+    let loaded = refresh_java_temurin_metadata_from_provider_manifest(&mut cache, &clock, context)?;
+    parse_java_temurin_release_metadata(&loaded.contents)
 }
 
 fn parse_java_temurin_release_metadata(contents: &str) -> Result<JavaReleaseMetadata, CliError> {
@@ -6785,6 +6930,308 @@ fn parse_cached_java_release_metadata(contents: &str) -> Result<JavaReleaseMetad
                 ))
             }),
     }
+}
+
+#[derive(Debug, Clone)]
+struct JavaTemurinProviderManifest {
+    available_releases_url: String,
+    feature_releases_url_template: String,
+    known_feature_releases: Vec<u32>,
+}
+
+impl JavaTemurinProviderManifest {
+    fn feature_releases_url(&self, feature: u32, page: u32) -> String {
+        self.feature_releases_url_template
+            .replace("{feature}", &feature.to_string())
+            .replace("{page}", &page.to_string())
+    }
+}
+
+fn load_java_temurin_provider_manifest(
+    context: &CommandContext,
+) -> Result<JavaTemurinProviderManifest, CliError> {
+    let manifest = serde_json::from_str::<serde_json::Value>(include_str!(
+        "../../../metadata/providers/java/temurin/manifest.json"
+    ))
+    .map_err(|error| {
+        CliError::runtime(format!(
+            "failed to parse built-in Java Temurin provider manifest: {error}"
+        ))
+    })?;
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            CliError::runtime(
+                "invalid Java Temurin provider manifest: missing `version`".to_owned(),
+            )
+        })?;
+    let metadata = version
+        .get("metadata")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            CliError::runtime(
+                "invalid Java Temurin provider manifest: missing `version.metadata`".to_owned(),
+            )
+        })?;
+    let base_url = required_manifest_string(metadata, "official_base_url")?;
+    let base_url_env = required_manifest_string(metadata, "base_url_env_override")?;
+    if base_url_env != JAVA_TEMURIN_API_BASE_URL_ENV {
+        return Err(CliError::runtime(format!(
+            "invalid Java Temurin provider manifest: base_url_env_override must be `{JAVA_TEMURIN_API_BASE_URL_ENV}`"
+        )));
+    }
+    let base_url = context
+        .env_vars
+        .get(base_url_env)
+        .map(String::as_str)
+        .unwrap_or(base_url);
+    let available_releases_path = required_manifest_string(metadata, "available_releases_path")?;
+    let feature_releases_path_template =
+        required_manifest_string(metadata, "feature_releases_path_template")?;
+    if !feature_releases_path_template.contains("{feature}") {
+        return Err(CliError::runtime(
+            "invalid Java Temurin provider manifest: feature_releases_path_template must contain `{feature}`"
+                .to_owned(),
+        ));
+    }
+    if !feature_releases_path_template.contains("{page}") {
+        return Err(CliError::runtime(
+            "invalid Java Temurin provider manifest: feature_releases_path_template must contain `{page}`"
+                .to_owned(),
+        ));
+    }
+    let known_feature_releases = optional_manifest_u32_array(
+        version
+            .get("known_versions")
+            .and_then(|known_versions| known_versions.get("feature_releases")),
+        "version.known_versions.feature_releases",
+    )?;
+
+    Ok(JavaTemurinProviderManifest {
+        available_releases_url: join_base_url_and_path(base_url, available_releases_path),
+        feature_releases_url_template: join_base_url_and_path(
+            base_url,
+            feature_releases_path_template,
+        ),
+        known_feature_releases,
+    })
+}
+
+fn optional_manifest_u32_array(
+    value: Option<&serde_json::Value>,
+    path: &str,
+) -> Result<Vec<u32>, CliError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let array = value.as_array().ok_or_else(|| {
+        CliError::runtime(format!(
+            "invalid Java Temurin provider manifest: `{path}` must be an array"
+        ))
+    })?;
+    let mut values = BTreeSet::new();
+    for entry in array {
+        let value = entry.as_u64().ok_or_else(|| {
+            CliError::runtime(format!(
+                "invalid Java Temurin provider manifest: `{path}` entries must be positive integers"
+            ))
+        })?;
+        let value = u32::try_from(value).map_err(|error| {
+            CliError::runtime(format!(
+                "invalid Java Temurin provider manifest: `{path}` entry is too large: {error}"
+            ))
+        })?;
+        if value == 0 {
+            return Err(CliError::runtime(format!(
+                "invalid Java Temurin provider manifest: `{path}` entries must be positive integers"
+            )));
+        }
+        values.insert(value);
+    }
+
+    Ok(values.into_iter().collect())
+}
+
+fn required_manifest_string<'a>(
+    metadata: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<&'a str, CliError> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CliError::runtime(format!(
+                "invalid Java Temurin provider manifest: missing `version.metadata.{key}`"
+            ))
+        })
+}
+
+fn join_base_url_and_path(base_url: &str, path: &str) -> String {
+    format!("{}{}", base_url.trim_end_matches('/'), path)
+}
+
+fn refresh_java_temurin_metadata_from_provider_manifest(
+    cache: &mut FileMetadataCache,
+    clock: &dyn Clock,
+    context: &CommandContext,
+) -> Result<LoadedReleaseMetadata, CliError> {
+    let manifest = load_java_temurin_provider_manifest(context)?;
+    let mut client = ReqwestMetadataHttpClient::new()?;
+    let features = match fetch_java_temurin_metadata_url(
+        &manifest.available_releases_url,
+        &mut client,
+        "available releases",
+    ) {
+        Ok(contents) => parse_java_temurin_available_releases(&contents)?,
+        Err(_) if !manifest.known_feature_releases.is_empty() => {
+            manifest.known_feature_releases.clone()
+        }
+        Err(error) => return Err(error),
+    };
+    let mut releases = Vec::new();
+
+    for feature in features {
+        let mut reached_last_page = false;
+        for page in 0..JAVA_TEMURIN_FEATURE_RELEASE_PAGE_LIMIT {
+            let url = manifest.feature_releases_url(feature, page);
+            let Some(contents) =
+                fetch_java_temurin_optional_metadata_url(&url, &mut client, "feature releases")?
+            else {
+                reached_last_page = true;
+                break;
+            };
+            let mut feature_releases = serde_json::from_str::<Vec<serde_json::Value>>(&contents)
+                .map_err(|error| {
+                    CliError::runtime(format!(
+                        "failed to parse Java Temurin feature metadata from `{url}`: {error}"
+                    ))
+                })?;
+            if feature_releases.is_empty() {
+                reached_last_page = true;
+                break;
+            }
+            releases.append(&mut feature_releases);
+        }
+        if !reached_last_page {
+            return Err(CliError::runtime(format!(
+                "Java Temurin feature `{feature}` exceeded page limit {JAVA_TEMURIN_FEATURE_RELEASE_PAGE_LIMIT}; update pagination handling before trusting metadata"
+            )));
+        }
+    }
+
+    if releases.is_empty() {
+        return Err(CliError::runtime(
+            "Java Temurin provider manifest did not resolve any installable release metadata"
+                .to_owned(),
+        ));
+    }
+
+    let contents = serde_json::to_string(&releases).map_err(|error| {
+        CliError::runtime(format!(
+            "failed to serialize Java Temurin provider metadata: {error}"
+        ))
+    })?;
+    parse_java_temurin_release_metadata(&contents)?;
+    let loaded = LoadedReleaseMetadata {
+        contents,
+        source_url: manifest.available_releases_url,
+    };
+    write_java_temurin_metadata_cache_entry(cache, clock, &loaded, "official-http", None)?;
+    Ok(loaded)
+}
+
+fn fetch_java_temurin_optional_metadata_url(
+    url: &str,
+    client: &mut ReqwestMetadataHttpClient,
+    label: &str,
+) -> Result<Option<String>, CliError> {
+    let request = MetadataHttpRequest::new(url);
+    let response = client.fetch_metadata(&request).map_err(CliError::from)?;
+    match response.status() {
+        200 => String::from_utf8(response.into_body())
+            .map(Some)
+            .map_err(|error| {
+                CliError::runtime(format!(
+                    "Java Temurin {label} response from `{url}` was not valid UTF-8: {error}"
+                ))
+            }),
+        304 => Err(CliError::runtime(format!(
+            "Java Temurin {label} request to `{url}` unexpectedly returned not modified without a cached payload"
+        ))),
+        404 => Ok(None),
+        status @ 400..=499 => Err(CliError::runtime(format!(
+            "Java Temurin {label} request to `{url}` failed with status {status}; provider metadata endpoint was not found or rejected the request"
+        ))),
+        status @ 500..=599 => Err(CliError::runtime(format!(
+            "Java Temurin {label} request to `{url}` failed with status {status}; retryable=true"
+        ))),
+        status => Err(CliError::runtime(format!(
+            "Java Temurin {label} request to `{url}` returned unsupported status {status}"
+        ))),
+    }
+}
+
+fn fetch_java_temurin_metadata_url(
+    url: &str,
+    client: &mut ReqwestMetadataHttpClient,
+    label: &str,
+) -> Result<String, CliError> {
+    match fetch_metadata_payload(MetadataPayloadFetchRequest::new(url), client)? {
+        MetadataFetchOutcome::Fetched(response) => {
+            String::from_utf8(response.into_body()).map_err(|error| {
+                CliError::runtime(format!(
+                    "Java Temurin {label} response from `{url}` was not valid UTF-8: {error}"
+                ))
+            })
+        }
+        MetadataFetchOutcome::NotModified { .. } => Err(CliError::runtime(format!(
+            "Java Temurin {label} request to `{url}` unexpectedly returned not modified without a cached payload"
+        ))),
+        MetadataFetchOutcome::Offline { reason } => Err(CliError::runtime(format!(
+            "Java Temurin {label} request to `{url}` was skipped: {reason}"
+        ))),
+    }
+}
+
+fn parse_java_temurin_available_releases(contents: &str) -> Result<Vec<u32>, CliError> {
+    let value = serde_json::from_str::<serde_json::Value>(contents).map_err(|error| {
+        CliError::runtime(format!(
+            "failed to parse Java Temurin available releases metadata: {error}"
+        ))
+    })?;
+    let mut features = value
+        .get("available_releases")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            CliError::runtime(
+                "invalid Java Temurin available releases metadata: missing `available_releases`"
+                    .to_owned(),
+            )
+        })?
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    CliError::runtime(
+                        "invalid Java Temurin available releases metadata: release feature must be a positive integer"
+                            .to_owned(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    features.sort_unstable_by(|left, right| right.cmp(left));
+    features.dedup();
+    if features.is_empty() {
+        return Err(CliError::runtime(
+            "Java Temurin available releases metadata did not contain any feature releases"
+                .to_owned(),
+        ));
+    }
+    Ok(features)
 }
 
 fn refresh_java_temurin_metadata_from_fixture(
