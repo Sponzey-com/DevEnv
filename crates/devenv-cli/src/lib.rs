@@ -815,8 +815,18 @@ where
         project_config.as_ref(),
         global_config.as_ref(),
         context,
-    )?
-    .ok_or_else(|| missing_selection_error(&tool))?;
+    )?;
+    let Some(selection) = selection else {
+        return run_unselected_shim_fallback(
+            &tool,
+            binary_name,
+            command_args,
+            stdout,
+            stderr,
+            context,
+        );
+    };
+
     let activation = activation_plan_for_cli_selection(&selection, current_platform(), context)?;
     let mut runner = ProcessCommandRunner;
     let output = dispatch_shim_command(
@@ -832,6 +842,60 @@ where
     write!(stderr, "{}", output.stderr())?;
 
     Ok(output.status_code())
+}
+
+fn run_unselected_shim_fallback<O, E>(
+    tool: &ToolName,
+    binary_name: &str,
+    command_args: &[String],
+    stdout: &mut O,
+    stderr: &mut E,
+    context: &CommandContext,
+) -> Result<i32, CliError>
+where
+    O: Write,
+    E: Write,
+{
+    let Some(fallback_path) = path_without_devenv_shims(context)? else {
+        return Err(missing_selection_error(tool));
+    };
+    let activation = ActivationPlan::new().set_env("PATH", fallback_path);
+    let mut runner = ProcessCommandRunner;
+    let output = dispatch_shim_command(
+        binary_name,
+        command_args,
+        activation,
+        &context.current_dir,
+        &context.env_vars,
+        &mut runner,
+    )?;
+
+    write!(stdout, "{}", output.stdout())?;
+    write!(stderr, "{}", output.stderr())?;
+
+    Ok(output.status_code())
+}
+
+fn path_without_devenv_shims(context: &CommandContext) -> Result<Option<String>, CliError> {
+    let Some(path) = context.env_vars.get("PATH") else {
+        return Ok(None);
+    };
+    let home = DevEnvHome::resolve_from_env(&context.env_vars)?;
+    let shim_dir = home.shims_dir();
+    let entries = std::env::split_paths(path)
+        .filter(|entry| entry != &shim_dir)
+        .collect::<Vec<_>>();
+
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    let joined = std::env::join_paths(entries).map_err(|error| {
+        CliError::runtime(format!(
+            "failed to build fallback PATH without DevEnv shims: {error}"
+        ))
+    })?;
+    Ok(Some(joined.to_string_lossy().into_owned()))
 }
 
 fn run_add_command<O>(

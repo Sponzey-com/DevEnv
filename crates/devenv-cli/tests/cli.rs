@@ -3195,6 +3195,39 @@ fn shim_dispatch_resolves_current_directory_config() {
 }
 
 #[test]
+fn shim_dispatch_falls_back_to_system_command_when_no_version_is_selected() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let shim_dir = devenv_home.join("shims");
+    let system_bin = temp.path().join("system-bin");
+    fs::create_dir_all(&shim_dir).expect("shim dir should be created");
+    fs::create_dir_all(&system_bin).expect("system bin should be created");
+    write_executable(
+        &system_bin.join("npm"),
+        "#!/bin/sh\nprintf 'system-npm:%s:%s' \"$1\" \"$2\"\n",
+    );
+    let path =
+        std::env::join_paths([shim_dir.as_path(), system_bin.as_path()]).expect("PATH should join");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_GLOBAL_CONFIG")
+        .env("PATH", path)
+        .arg("shim")
+        .arg("dispatch")
+        .arg("npm")
+        .arg("--")
+        .arg("install")
+        .arg("-g")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("system-npm:install:-g"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
 fn shim_dispatch_detects_recursion() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     fs::write(temp.path().join("devenv.toml"), "[tools]\njava = \"17\"\n")

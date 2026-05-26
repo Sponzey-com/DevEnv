@@ -497,6 +497,8 @@ The shim directory is placed under `DEVENV_HOME/shims`. DevEnv prints activation
 
 After activation, `devenv local`, `devenv global`, and `devenv use` selections are resolved by shims on the next tool command in the same shell. Without activation, those commands only write selection config; they cannot modify the already-running parent shell's `PATH`.
 
+When a shimmed command has no DevEnv selection, DevEnv removes its shim directory from `PATH` and falls back to the next matching system command. This keeps commands such as `npm install -g @sponzey/devenv` usable even before a DevEnv-managed Node.js version is selected.
+
 Generated shims currently include:
 
 - Java: `java`, `javac`, `jar`, `javadoc`

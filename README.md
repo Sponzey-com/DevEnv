@@ -133,6 +133,7 @@ devenv global java 21
 This matters for npm installs because the npm entrypoint is a Node.js wrapper. The generated line uses the native DevEnv binary path so DevEnv shims can safely manage `node`, `npm`, and other commands.
 
 After activation, `devenv local`, `devenv global`, and `devenv use` selections are picked up by the shims for subsequent tool commands in that shell.
+If no DevEnv version is selected for a shimmed command, DevEnv falls back to the next matching command on `PATH`.
 
 Refresh remote metadata and install:
 

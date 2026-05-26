@@ -133,6 +133,7 @@ devenv global java 21
 npm 설치에서는 npm entrypoint가 Node.js wrapper이기 때문에 이 차이가 중요합니다. 출력되는 줄은 native DevEnv binary 경로를 사용하므로 DevEnv shim이 `node`, `npm` 같은 명령까지 안전하게 관리할 수 있습니다.
 
 활성화된 세션에서는 이후 `devenv local`, `devenv global`, `devenv use` 선택이 다음 tool 명령부터 shim에 바로 반영됩니다.
+shim 대상 명령에 DevEnv 선택 버전이 없으면 DevEnv는 `PATH`의 다음 실제 명령으로 fallback합니다.
 
 원격 metadata 갱신과 설치:
 
