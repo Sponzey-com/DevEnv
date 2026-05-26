@@ -6,7 +6,7 @@ DevEnv is a Rust-based CLI for selecting, installing, and activating development
 
 The project takes inspiration from tools such as `jenv`, `goenv`, `pyenv`, `asdf`, and `mise`, while aiming for a broader, extensible provider model across many languages and tools. DevEnv is CLI-first and does not require a server, GUI, daemon, database, or cloud dependency.
 
-The current product version is `0.1.11`. The single source of truth is the root `Cargo.toml`:
+The current product version is `0.1.12`. The single source of truth is the root `Cargo.toml`:
 
 ```text
 Cargo.toml -> [workspace.package] -> version
