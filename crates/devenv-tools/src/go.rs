@@ -10,7 +10,7 @@ use devenv_core::{
 };
 use serde::Deserialize;
 
-pub const GO_OFFICIAL_METADATA_URL: &str = "https://go.dev/dl/?mode=json";
+pub const GO_OFFICIAL_METADATA_URL: &str = "https://go.dev/dl/?mode=json&include=all";
 
 #[derive(Debug, Clone)]
 pub struct GoToolAdapter {

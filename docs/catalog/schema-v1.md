@@ -269,7 +269,7 @@ v1의 checksum 표기는 `sha256:<64 lowercase hex>`로 고정한다.
   "generated_at": "2026-05-22T00:00:00Z",
   "source": {
     "kind": "official-api",
-    "urls": ["https://go.dev/dl/?mode=json"],
+    "urls": ["https://go.dev/dl/?mode=json&include=all"],
     "retrieved_at": "2026-05-22T00:00:00Z",
     "generator": "devenv-catalog-fixture/0.1.0"
   },

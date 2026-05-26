@@ -339,7 +339,7 @@ fn generate_go_payload(
         "official",
         &options.generated_at,
         "official-api",
-        vec!["https://go.dev/dl/?mode=json".to_owned()],
+        vec!["https://go.dev/dl/?mode=json&include=all".to_owned()],
         normalized_releases,
     ))
 }

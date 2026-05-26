@@ -13,7 +13,7 @@
   },
   "upstream": {
     "metadata_urls": [
-      "https://go.dev/dl/?mode=json"
+      "https://go.dev/dl/?mode=json&include=all"
     ],
     "artifact_url_policy": "Use artifact URLs from the official Go release metadata."
   },

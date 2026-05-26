@@ -6042,7 +6042,10 @@ fn refresh_go_official_metadata(
     let key = go_official_metadata_cache_key();
     let existing = cache.read_metadata(&key)?;
     let mut request = MetadataPayloadFetchRequest::new(GO_OFFICIAL_METADATA_URL);
-    if let Some(existing) = existing.as_ref() {
+    let reusable_existing = existing
+        .as_ref()
+        .filter(|entry| entry.source_url() == GO_OFFICIAL_METADATA_URL);
+    if let Some(existing) = reusable_existing {
         if let Some(etag) = existing.validator_metadata().get("etag") {
             request = request.with_etag(etag.clone());
         }
@@ -6078,7 +6081,7 @@ fn refresh_go_official_metadata(
             Ok(loaded)
         }
         MetadataFetchOutcome::NotModified { headers } => {
-            let Some(existing) = existing else {
+            let Some(existing) = reusable_existing else {
                 return Err(CliError::runtime(
                     "Go official metadata endpoint returned not-modified but no local cache exists"
                         .to_owned(),
@@ -6086,7 +6089,7 @@ fn refresh_go_official_metadata(
             };
             let loaded = LoadedReleaseMetadata {
                 contents: existing.payload().to_owned(),
-                source_url: existing.source_url().to_owned(),
+                source_url: GO_OFFICIAL_METADATA_URL.to_owned(),
             };
             parse_go_official_release_metadata(&loaded.contents)?;
             let etag = headers

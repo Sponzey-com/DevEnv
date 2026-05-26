@@ -130,7 +130,7 @@ fn metadata_cache_writes_and_reads_roundtrip_in_temp_directory() {
     let mut cache = FileMetadataCache::at_home(&home);
     let entry = MetadataCacheEntry::new(
         go_key().with_selector("stable"),
-        "https://go.dev/dl/?mode=json",
+        "https://go.dev/dl/?mode=json&include=all",
         "unix:100",
         3600,
         ABC_SHA256,
@@ -200,7 +200,7 @@ fn go_key() -> MetadataCacheKey {
 fn raw_entry(fetched_at: &str, ttl_seconds: u64) -> MetadataCacheEntry {
     MetadataCacheEntry::new(
         go_key(),
-        "https://go.dev/dl/?mode=json",
+        "https://go.dev/dl/?mode=json&include=all",
         fetched_at,
         ttl_seconds,
         ABC_SHA256,

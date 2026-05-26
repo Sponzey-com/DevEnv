@@ -6,7 +6,7 @@
   "source": {
     "kind": "official-api",
     "urls": [
-      "https://go.dev/dl/?mode=json"
+      "https://go.dev/dl/?mode=json&include=all"
     ],
     "retrieved_at": "2026-05-22T00:00:00Z",
     "generator": "devenv-catalog-fixture/0.1.0"
