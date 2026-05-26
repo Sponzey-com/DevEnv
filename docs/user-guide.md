@@ -84,12 +84,14 @@ devenv local terraform 1.8
 devenv local opentofu 1.8
 ```
 
-Global selection writes the file pointed to by `DEVENV_GLOBAL_CONFIG`:
+Global selection writes the file pointed to by `DEVENV_GLOBAL_CONFIG`, or the default DevEnv global config when that variable is not set:
 
 ```sh
 export DEVENV_GLOBAL_CONFIG="$HOME/.config/devenv/devenv.toml"
 devenv global java 21
 ```
+
+When `DEVENV_GLOBAL_CONFIG` is not set, DevEnv writes the global selection to the default global config under `DEVENV_HOME`.
 
 Shell selection prints an export command and does not write files:
 
@@ -449,13 +451,15 @@ Ruby and PHP are not part of remote install yet. Register existing runtimes with
 
 ## Shim Setup
 
-Generate shims:
+`devenv exec -- <command>` activates selected tools for one command. Direct commands such as `java --version` require the DevEnv shim directory to be active in the current shell.
+
+Generate shims manually:
 
 ```sh
 devenv shim init
 ```
 
-Print shell activation for the current session:
+Print shell activation for the current session. `activate` also generates shims, so this is normally the only setup command needed for direct tool commands:
 
 ```sh
 eval "$(devenv activate zsh)"
@@ -481,6 +485,8 @@ devenv shim rehash
 ```
 
 The shim directory is placed under `DEVENV_HOME/shims`. DevEnv prints activation scripts only; it does not mutate shell profile files.
+
+After activation, `devenv local`, `devenv global`, and `devenv use` selections are resolved by shims on the next tool command in the same shell. Without activation, those commands only write selection config; they cannot modify the already-running parent shell's `PATH`.
 
 Generated shims currently include:
 

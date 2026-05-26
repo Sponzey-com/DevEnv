@@ -352,7 +352,7 @@ Example:
         "global" => Some(
             r#"Usage: devenv global <tool> <version> [--dry-run]
 
-Writes a global selection to the file pointed to by DEVENV_GLOBAL_CONFIG.
+Writes a global selection to DEVENV_GLOBAL_CONFIG when set, or to the default DevEnv global config under DEVENV_HOME.
 The compact selector form, such as node@20, is also accepted for compatibility.
 
 Example:
@@ -450,6 +450,7 @@ Example:
             r#"Usage: devenv activate <zsh|bash|fish|powershell>
 
 Prints shell activation that sets DEVENV_HOME and prepends the shim directory.
+Activation also generates DevEnv shims, so direct commands such as `java --version` use the current DevEnv selection after eval.
 
 Example:
   eval "$(devenv activate zsh)""#,
@@ -601,12 +602,7 @@ where
     }
 
     let project_config = discover_project_config_from(&context.current_dir)?;
-    let global_config = context
-        .global_config_path
-        .as_ref()
-        .map(|path| read_devenv_toml_config(path, ConfigScope::Global))
-        .transpose()?
-        .flatten();
+    let global_config = read_global_config(context)?;
 
     match args {
         [selector] if selector.contains('@') => {
@@ -706,12 +702,7 @@ where
 
     let command_args = parse_exec_args(args)?;
     let project_config = discover_project_config_from(&context.current_dir)?;
-    let global_config = context
-        .global_config_path
-        .as_ref()
-        .map(|path| read_devenv_toml_config(path, ConfigScope::Global))
-        .transpose()?
-        .flatten();
+    let global_config = read_global_config(context)?;
     let selections =
         resolve_all_selected_tools(project_config.as_ref(), global_config.as_ref(), context)?;
 
@@ -814,12 +805,7 @@ where
     })?;
 
     let project_config = discover_project_config_from(&context.current_dir)?;
-    let global_config = context
-        .global_config_path
-        .as_ref()
-        .map(|path| read_devenv_toml_config(path, ConfigScope::Global))
-        .transpose()?
-        .flatten();
+    let global_config = read_global_config(context)?;
     let selection = resolve_single_selection(
         tool.clone(),
         None,
@@ -3583,6 +3569,7 @@ where
 
     let syntax = parse_shell_syntax(&args[0])?;
     let home = DevEnvHome::resolve_from_env(&context.env_vars)?;
+    let _ = run_shim_rehash(context)?;
     let plan = ActivationPlan::new()
         .set_env("DEVENV_HOME", home.root().to_string_lossy())
         .prepend_path(home.shims_dir());
@@ -5244,6 +5231,7 @@ where
             if !dry_run {
                 let mut repository = NativeConfigRepository::new(&path, ConfigScope::Project);
                 repository.set_requirement(spec.tool().clone(), spec.requirement().clone())?;
+                refresh_shims_if_active(context)?;
             }
             write_selection_change(
                 stdout,
@@ -5251,25 +5239,24 @@ where
                 spec.tool(),
                 spec.requirement(),
                 Some(&path),
-            )
+            )?;
+            write_activation_hint_if_needed(stdout, context)
         }
         ScopeCommand::Global => {
-            let path = context.global_config_path.as_ref().ok_or_else(|| {
-                CliError::runtime(format!(
-                    "global config path is not configured. Set `{GLOBAL_CONFIG_ENV}` to the devenv.toml path to update."
-                ))
-            })?;
+            let path = resolve_global_config_path(context)?;
             if !dry_run {
-                let mut repository = NativeConfigRepository::new(path, ConfigScope::Global);
+                let mut repository = NativeConfigRepository::new(&path, ConfigScope::Global);
                 repository.set_requirement(spec.tool().clone(), spec.requirement().clone())?;
+                refresh_shims_if_active(context)?;
             }
             write_selection_change(
                 stdout,
                 "global",
                 spec.tool(),
                 spec.requirement(),
-                Some(path),
-            )
+                Some(&path),
+            )?;
+            write_activation_hint_if_needed(stdout, context)
         }
         ScopeCommand::Shell => {
             if dry_run {
@@ -5283,6 +5270,83 @@ where
             )?;
             Ok(())
         }
+    }
+}
+
+fn read_global_config(context: &CommandContext) -> Result<Option<ProjectConfig>, CliError> {
+    let path = resolve_global_config_path(context)?;
+    read_devenv_toml_config(&path, ConfigScope::Global).map_err(Into::into)
+}
+
+fn resolve_global_config_path(context: &CommandContext) -> Result<PathBuf, CliError> {
+    if let Some(path) = &context.global_config_path {
+        return Ok(path.clone());
+    }
+
+    let home = DevEnvHome::resolve_from_env(&context.env_vars)?;
+    Ok(home.global_config_file())
+}
+
+fn refresh_shims_if_active(context: &CommandContext) -> Result<(), CliError> {
+    let Some(home_root) = context
+        .env_vars
+        .get(devenv_adapters::store::DEVENV_HOME_ENV)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let home = DevEnvHome::new(home_root);
+    if path_contains_dir(context.env_vars.get("PATH"), &home.shims_dir()) {
+        let _ = run_shim_rehash(context)?;
+    }
+    Ok(())
+}
+
+fn write_activation_hint_if_needed<O>(
+    stdout: &mut O,
+    context: &CommandContext,
+) -> Result<(), CliError>
+where
+    O: Write,
+{
+    if let Some(home_root) = context
+        .env_vars
+        .get(devenv_adapters::store::DEVENV_HOME_ENV)
+        .filter(|value| !value.is_empty())
+    {
+        let home = DevEnvHome::new(home_root);
+        if path_contains_dir(context.env_vars.get("PATH"), &home.shims_dir()) {
+            return Ok(());
+        }
+    }
+
+    writeln!(
+        stdout,
+        "next: run `{}` once so tool commands use DevEnv selections in this shell.",
+        activation_hint(context)
+    )?;
+    Ok(())
+}
+
+fn path_contains_dir(path: Option<&String>, directory: &Path) -> bool {
+    path.into_iter()
+        .flat_map(|value| std::env::split_paths(value))
+        .any(|entry| entry == directory)
+}
+
+fn activation_hint(context: &CommandContext) -> &'static str {
+    let shell = context
+        .env_vars
+        .get("SHELL")
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("zsh");
+
+    match shell {
+        "bash" => "eval \"$(devenv activate bash)\"",
+        "fish" => "devenv activate fish | source",
+        _ => "eval \"$(devenv activate zsh)\"",
     }
 }
 
@@ -8343,34 +8407,48 @@ impl DoctorReport {
             )),
         }
 
-        if let Some(path) = &context.global_config_path {
-            match read_devenv_toml_config(path, ConfigScope::Global) {
+        match resolve_global_config_path(context) {
+            Ok(path) => match read_devenv_toml_config(&path, ConfigScope::Global) {
                 Ok(Some(_)) => checks.push(DoctorCheck::ok(
                     "global config",
                     "global config is readable",
-                    Some(path.clone()),
+                    Some(path),
                     None,
                 )),
-                Ok(None) => checks.push(DoctorCheck::warning(
+                Ok(None) if context.global_config_path.is_some() => {
+                    checks.push(DoctorCheck::warning(
+                        "global config",
+                        "global config path is configured but file does not exist",
+                        Some(path),
+                        Some("run `devenv global <tool> <version>`"),
+                    ));
+                }
+                Ok(None) => checks.push(DoctorCheck::ok(
                     "global config",
-                    "global config path is configured but file does not exist",
-                    Some(path.clone()),
-                    Some("run `devenv global <tool> <version>`"),
+                    "default global config has not been created yet",
+                    Some(path),
+                    Some("run `devenv global <tool> <version>` to create one"),
                 )),
-                Err(error) => checks.push(DoctorCheck::error(
-                    "global config",
-                    error.to_string(),
-                    Some(path.clone()),
-                    Some("fix or remove DEVENV_GLOBAL_CONFIG"),
-                )),
-            }
-        } else {
-            checks.push(DoctorCheck::ok(
+                Err(error) => {
+                    let next = if context.global_config_path.is_some() {
+                        "fix or remove DEVENV_GLOBAL_CONFIG"
+                    } else {
+                        "fix or remove the default global config file"
+                    };
+                    checks.push(DoctorCheck::error(
+                        "global config",
+                        error.to_string(),
+                        Some(path),
+                        Some(next),
+                    ));
+                }
+            },
+            Err(error) => checks.push(DoctorCheck::error(
                 "global config",
-                "DEVENV_GLOBAL_CONFIG is not set",
+                error.to_string(),
                 None,
-                Some("set DEVENV_GLOBAL_CONFIG to enable global selections"),
-            ));
+                Some("set DEVENV_HOME or HOME to a writable location"),
+            )),
         }
 
         Self { checks }

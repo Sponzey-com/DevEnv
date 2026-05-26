@@ -107,7 +107,7 @@ devenv local go 1.22
 devenv local node 20
 ```
 
-활성화 후 명령 실행:
+DevEnv 활성화로 명령 실행:
 
 ```sh
 devenv current
@@ -115,6 +115,15 @@ devenv exec -- java -version
 devenv exec -- go version
 devenv exec -- node --version
 ```
+
+`java --version`처럼 직접 실행하는 명령도 DevEnv 선택을 따르게 하려면 현재 쉘에서 shim을 한 번 활성화해야 합니다.
+
+```sh
+eval "$(devenv activate zsh)"
+java --version
+```
+
+활성화된 세션에서는 이후 `devenv local`, `devenv global`, `devenv use` 선택이 다음 tool 명령부터 shim에 바로 반영됩니다.
 
 원격 metadata 갱신과 설치:
 

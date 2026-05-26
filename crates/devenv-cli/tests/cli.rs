@@ -190,22 +190,56 @@ fn python_install_strategy_adr_records_deferred_live_provider() {
 #[test]
 fn local_command_writes_project_devenv_toml() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
 
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
         .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
         .env_remove("DEVENV_GLOBAL_CONFIG")
         .arg("local")
         .arg("java")
         .arg("17")
         .assert()
         .success()
-        .stdout(predicate::str::contains("java 17 local"));
+        .stdout(predicate::str::contains("java 17 local"))
+        .stdout(predicate::str::contains("devenv activate"));
 
     let contents =
         fs::read_to_string(temp.path().join("devenv.toml")).expect("config should be readable");
     assert!(contents.contains("[tools]"));
     assert!(contents.contains("java = \"17\""));
+}
+
+#[test]
+fn local_command_refreshes_shims_when_activation_path_is_present() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let shim_dir = devenv_home.join("shims");
+    fs::create_dir_all(&shim_dir).expect("shim dir should be created");
+    let path = std::env::join_paths(std::iter::once(shim_dir.clone()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("PATH should join");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("PATH", path)
+        .env_remove("DEVENV_GLOBAL_CONFIG")
+        .arg("local")
+        .arg("java")
+        .arg("17")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("java 17 local"))
+        .stdout(predicate::str::contains("devenv activate").not());
+
+    assert!(
+        shim_dir.join("java").is_file(),
+        "active sessions should refresh shims when local selection changes"
+    );
 }
 
 #[test]
@@ -223,6 +257,30 @@ fn global_command_writes_injected_global_config() {
         .assert()
         .success()
         .stdout(predicate::str::contains("go 1.22.5 global"));
+
+    let contents = fs::read_to_string(&global_config).expect("global config should be readable");
+    assert!(contents.contains("[tools]"));
+    assert!(contents.contains("go = \"1.22.5\""));
+}
+
+#[test]
+fn global_command_writes_default_global_config_when_env_is_not_set() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let global_config = devenv_home.join("devenv.toml");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env_remove("DEVENV_GLOBAL_CONFIG")
+        .arg("global")
+        .arg("go")
+        .arg("1.22.5")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.22.5 global"))
+        .stdout(predicate::str::contains(global_config.to_string_lossy()));
 
     let contents = fs::read_to_string(&global_config).expect("global config should be readable");
     assert!(contents.contains("[tools]"));
@@ -252,10 +310,12 @@ fn shell_command_outputs_export_without_writing_files() {
 #[test]
 fn use_without_scope_defaults_to_local() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
 
     Command::cargo_bin("devenv")
         .expect("devenv binary should build")
         .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
         .env_remove("DEVENV_GLOBAL_CONFIG")
         .arg("use")
         .arg("java")
@@ -3162,6 +3222,11 @@ fn activate_renders_shell_scripts_without_writing_profiles() {
         .stdout(predicate::str::contains("export DEVENV_HOME="))
         .stdout(predicate::str::contains("shims"))
         .stdout(predicate::str::contains("PATH"));
+
+    assert!(
+        devenv_home.join("shims/java").is_file(),
+        "activate should generate shims so selected tools apply immediately after activation"
+    );
 
     assert_eq!(
         fs::read_to_string(&profile).expect("profile should be readable"),

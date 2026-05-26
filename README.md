@@ -107,7 +107,7 @@ devenv local go 1.22
 devenv local node 20
 ```
 
-Activate and run commands:
+Run with DevEnv activation:
 
 ```sh
 devenv current
@@ -115,6 +115,15 @@ devenv exec -- java -version
 devenv exec -- go version
 devenv exec -- node --version
 ```
+
+For direct commands such as `java --version`, activate shims once in the current shell:
+
+```sh
+eval "$(devenv activate zsh)"
+java --version
+```
+
+After activation, `devenv local`, `devenv global`, and `devenv use` selections are picked up by the shims for subsequent tool commands in that shell.
 
 Refresh remote metadata and install:
 

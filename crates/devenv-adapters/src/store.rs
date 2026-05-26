@@ -63,6 +63,10 @@ impl DevEnvHome {
         self.root.join("shims")
     }
 
+    pub fn global_config_file(&self) -> PathBuf {
+        self.root.join("devenv.toml")
+    }
+
     pub fn state_dir(&self) -> PathBuf {
         self.root.join("state")
     }
