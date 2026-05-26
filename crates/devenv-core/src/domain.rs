@@ -35,7 +35,7 @@ impl fmt::Display for DomainError {
             Self::InvalidToolSpec { value } => {
                 write!(
                     formatter,
-                    "invalid tool spec `{value}`: expected <tool>@<version>, for example java@17"
+                    "invalid tool spec `{value}`: expected a compact tool selector such as java@17"
                 )
             }
         }

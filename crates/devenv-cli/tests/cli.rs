@@ -45,10 +45,7 @@ fn help_subcommand_prints_command_usage() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Usage: devenv install <tool>@<version>",
-        ))
-        .stdout(predicate::str::contains(
-            "devenv install <tool> <version> [provider-or-channel]",
+            "Usage: devenv install <tool> <version>",
         ))
         .stdout(predicate::str::contains("DevEnv-owned storage"))
         .stderr(predicate::str::is_empty());
@@ -60,10 +57,7 @@ fn help_subcommand_prints_command_usage() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Usage: devenv uninstall <tool>@<version>",
-        ))
-        .stdout(predicate::str::contains(
-            "devenv uninstall <tool> <version>",
+            "Usage: devenv uninstall <tool> <version>",
         ))
         .stdout(predicate::str::contains(
             "Deletes only DevEnv-owned installs",
@@ -202,7 +196,8 @@ fn local_command_writes_project_devenv_toml() {
         .current_dir(temp.path())
         .env_remove("DEVENV_GLOBAL_CONFIG")
         .arg("local")
-        .arg("java@17")
+        .arg("java")
+        .arg("17")
         .assert()
         .success()
         .stdout(predicate::str::contains("java 17 local"));
@@ -223,7 +218,8 @@ fn global_command_writes_injected_global_config() {
         .current_dir(temp.path())
         .env("DEVENV_GLOBAL_CONFIG", &global_config)
         .arg("global")
-        .arg("go@1.22.5")
+        .arg("go")
+        .arg("1.22.5")
         .assert()
         .success()
         .stdout(predicate::str::contains("go 1.22.5 global"));
@@ -243,7 +239,8 @@ fn shell_command_outputs_export_without_writing_files() {
         .current_dir(temp.path())
         .env("DEVENV_GLOBAL_CONFIG", &global_config)
         .arg("shell")
-        .arg("java@17")
+        .arg("java")
+        .arg("17")
         .assert()
         .success()
         .stdout(predicate::str::contains("export DEVENV_TOOL_JAVA='17'"));
@@ -261,7 +258,8 @@ fn use_without_scope_defaults_to_local() {
         .current_dir(temp.path())
         .env_remove("DEVENV_GLOBAL_CONFIG")
         .arg("use")
-        .arg("java@17")
+        .arg("java")
+        .arg("17")
         .assert()
         .success()
         .stdout(predicate::str::contains("java 17 local"));
@@ -281,7 +279,8 @@ fn use_scope_global_writes_injected_global_config() {
         .current_dir(temp.path())
         .env("DEVENV_GLOBAL_CONFIG", &global_config)
         .arg("use")
-        .arg("go@1.22.5")
+        .arg("go")
+        .arg("1.22.5")
         .arg("--scope")
         .arg("global")
         .assert()
@@ -356,7 +355,8 @@ fn current_cli_override_wins_when_tool_spec_is_given() {
         .current_dir(temp.path())
         .env("DEVENV_TOOL_JAVA", "21")
         .arg("current")
-        .arg("java@22")
+        .arg("java")
+        .arg("22")
         .assert()
         .success()
         .stdout(predicate::str::contains("java 22 cli"));
@@ -521,7 +521,7 @@ fn missing_current_selection_reports_actionable_error() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no version selected for java"))
-        .stderr(predicate::str::contains("devenv local java@<version>"));
+        .stderr(predicate::str::contains("devenv local java <version>"));
 }
 
 #[test]
@@ -570,10 +570,10 @@ fn exec_missing_runtime_reports_install_and_add_guidance() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "java@17 is selected but not installed or registered",
+            "java 17 is selected but not installed or registered",
         ))
         .stderr(predicate::str::contains("devenv add java <path>"))
-        .stderr(predicate::str::contains("devenv install java@17"))
+        .stderr(predicate::str::contains("devenv install java 17"))
         .stderr(predicate::str::contains("devenv list java"));
 }
 

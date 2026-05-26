@@ -48,7 +48,7 @@ fn invalid_tool_specs_are_actionable() {
         let message = error.to_string();
 
         assert!(message.contains("invalid tool spec"));
-        assert!(message.contains("<tool>@<version>"));
+        assert!(message.contains("compact tool selector"));
         assert!(message.contains("java@17"));
     }
 }

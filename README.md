@@ -6,7 +6,7 @@ DevEnv is a Rust-based CLI for selecting, installing, and activating development
 
 The project takes inspiration from tools such as `jenv`, `goenv`, `pyenv`, `asdf`, and `mise`, while aiming for a broader, extensible provider model across many languages and tools. DevEnv is CLI-first and does not require a server, GUI, daemon, database, or cloud dependency.
 
-The current product version is `0.1.14`. The single source of truth is the root `Cargo.toml`:
+The product version is defined by the root `Cargo.toml`:
 
 ```text
 Cargo.toml -> [workspace.package] -> version
@@ -19,13 +19,13 @@ DevEnv is currently in an MVP stage. The core workflow is implemented, but provi
 Supported workflows:
 
 - Register an existing runtime: `devenv add <tool> <path>`
-- Remove a registered external runtime: `devenv remove <tool>@<version>` or `devenv remove <tool> <path>`
-- Delete a DevEnv-owned install: `devenv uninstall <tool>@<version>`
+- Remove a registered external runtime: `devenv remove <tool> <path>`
+- Delete a DevEnv-owned install: `devenv uninstall <tool> <version>`
 - List installed and registered runtimes: `devenv list <tool>`
 - List remote versions: `devenv list-remote <tool>`
-- Install a runtime: `devenv install <tool>@<version>`
-- Select a project version: `devenv local <tool>@<version>`
-- Select a global version: `devenv global <tool>@<version>`
+- Install a runtime: `devenv install <tool> <version>`
+- Select a project version: `devenv local <tool> <version>`
+- Select a global version: `devenv global <tool> <version>`
 - Show the current selection: `devenv current`
 - Run a command in an activated environment: `devenv exec -- <command>`
 - Generate shims: `devenv shim rehash`
@@ -102,9 +102,9 @@ devenv add rust ~/.rustup/toolchains/1.85.0-aarch64-apple-darwin
 Select project versions:
 
 ```sh
-devenv local java@17
-devenv local go@1.22
-devenv local node@20
+devenv local java 17
+devenv local go 1.22
+devenv local node 20
 ```
 
 Activate and run commands:
@@ -120,7 +120,7 @@ Refresh remote metadata and install:
 
 ```sh
 devenv list-remote go --refresh
-devenv install go@1.22
+devenv install go 1.22
 ```
 
 ## Metadata And Catalog

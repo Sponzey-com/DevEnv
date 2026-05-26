@@ -64,7 +64,7 @@ DevEnv separates metadata refresh from runtime artifact download.
 
 - `devenv metadata update <tool>` and `devenv list-remote <tool> --refresh` fetch small provider metadata and write `$DEVENV_HOME/cache/metadata/<tool>/<provider>/metadata.json`.
 - `devenv list-remote <tool> --offline` reads fixture overrides or the metadata cache and does not use the network.
-- `devenv install <tool>@<version>` downloads the selected runtime artifact only after metadata resolution.
+- `devenv install <tool> <version>` downloads the selected runtime artifact only after metadata resolution.
 - downloaded artifacts are cached under `$DEVENV_HOME/cache/downloads`.
 
 Checksums are part of the Direct provider contract. A checksum-bearing artifact is promoted into the download cache only after verification. Providers without usable checksums should not be enabled for default Direct install.

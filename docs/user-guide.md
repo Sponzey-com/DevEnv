@@ -13,8 +13,8 @@ DevEnv separates three ideas:
 
 The active version is resolved from highest to lowest precedence:
 
-1. CLI override, such as `devenv current java@17`.
-2. Shell selection from `devenv shell <tool>@<version>`.
+1. CLI override, such as `devenv current java 17`.
+2. Shell selection from `devenv shell <tool> <version>`.
 3. Project `devenv.toml`.
 4. Global config from `DEVENV_GLOBAL_CONFIG`.
 
@@ -72,29 +72,29 @@ devenv remove opentofu /opt/opentofu-1.8.5/tofu
 Project-local selection writes `devenv.toml` in the current directory:
 
 ```sh
-devenv local java@17
-devenv local go@1.22
-devenv local node@20
-devenv local python@3.12
-devenv local ruby@3.3
-devenv local php@8.3
-devenv local rust@1.85
-devenv local flutter@3.24
-devenv local terraform@1.8
-devenv local opentofu@1.8
+devenv local java 17
+devenv local go 1.22
+devenv local node 20
+devenv local python 3.12
+devenv local ruby 3.3
+devenv local php 8.3
+devenv local rust 1.85
+devenv local flutter 3.24
+devenv local terraform 1.8
+devenv local opentofu 1.8
 ```
 
 Global selection writes the file pointed to by `DEVENV_GLOBAL_CONFIG`:
 
 ```sh
 export DEVENV_GLOBAL_CONFIG="$HOME/.config/devenv/devenv.toml"
-devenv global java@21
+devenv global java 21
 ```
 
 Shell selection prints an export command and does not write files:
 
 ```sh
-eval "$(devenv shell java@17)"
+eval "$(devenv shell java 17)"
 ```
 
 Inspect the active selection:
@@ -102,7 +102,7 @@ Inspect the active selection:
 ```sh
 devenv current
 devenv current java
-devenv current go@1.22.5
+devenv current go 1.22.5
 devenv current node
 devenv current python
 devenv current ruby
@@ -307,7 +307,7 @@ devenv metadata verify-catalog go --catalog /mirror/devenv-metadata/v1 --source 
 devenv metadata update go --source catalog
 devenv metadata status go
 devenv list-remote go --offline
-devenv install go@1.23
+devenv install go 1.23
 ```
 
 `metadata verify-catalog` validates the manifest signature, catalog freshness, and payload checksums before you use the catalog as a source. Current local development fixtures use a simple digest-backed signature verifier; production catalog publishing is documented separately and must use the accepted trust policy before the catalog becomes a default source.
@@ -420,25 +420,25 @@ Default tests and normal documentation verification do not require network acces
 Install into DevEnv-owned storage:
 
 ```sh
-devenv install java@17
-devenv install go@1.22.5
-devenv install node@20
-devenv install python@3.12
-devenv install flutter@3.24
-devenv install terraform@1.8
-devenv install opentofu@1.8
+devenv install java 17
+devenv install go 1.22.5
+devenv install node 20
+devenv install python 3.12
+devenv install flutter 3.24
+devenv install terraform 1.8
+devenv install opentofu 1.8
 ```
 
 Delete a DevEnv-owned runtime from storage:
 
 ```sh
-devenv uninstall java@17
-devenv uninstall go@1.22
-devenv uninstall node@20
-devenv uninstall python@3.12
-devenv uninstall flutter@3.24
-devenv uninstall terraform@1.8
-devenv uninstall opentofu@1.8
+devenv uninstall java 17
+devenv uninstall go 1.22
+devenv uninstall node 20
+devenv uninstall python 3.12
+devenv uninstall flutter 3.24
+devenv uninstall terraform 1.8
+devenv uninstall opentofu 1.8
 ```
 
 `uninstall` only removes DevEnv-owned installs for the current platform. It does not remove runtimes registered with `devenv add`; use `devenv remove <tool> <path>` for those.

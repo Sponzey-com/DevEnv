@@ -97,7 +97,7 @@ pub fn activation_plan_for_selected_runtime(
         selected_runtime_root(tool, requirement, platform, install_store, registry)
     else {
         return Err(CoreError::message(format!(
-            "{}@{} is selected but not installed or registered.\nRun `devenv add {} <path>` for an existing runtime, `devenv install {}@{}` for a DevEnv-owned runtime, or `devenv list {}` to inspect known runtimes.",
+            "{} {} is selected but not installed or registered.\nRun `devenv add {} <path>` for an existing runtime, `devenv install {} {}` for a DevEnv-owned runtime, or `devenv list {}` to inspect known runtimes.",
             tool,
             requirement.raw(),
             tool,

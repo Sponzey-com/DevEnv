@@ -70,8 +70,8 @@ use devenv_tools::{
 };
 
 pub const COMMAND_NAME: &str = "devenv";
-const INSTALL_USAGE: &str = "usage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]";
-const UNINSTALL_USAGE: &str = "usage: devenv uninstall <tool>@<version>";
+const INSTALL_USAGE: &str = "usage: devenv install <tool> <version> [provider-or-channel] [--dry-run] [--distribution temurin] [--channel stable]";
+const UNINSTALL_USAGE: &str = "usage: devenv uninstall <tool> <version>";
 const GLOBAL_CONFIG_ENV: &str = "DEVENV_GLOBAL_CONFIG";
 const SHELL_ENV_PREFIX: &str = "DEVENV_TOOL_";
 const JAVA_CANDIDATE_PATHS_ENV: &str = "DEVENV_JAVA_CANDIDATE_PATHS";
@@ -273,9 +273,9 @@ Supported tools:
 
 Examples:
   devenv add java /path/to/jdk
-  devenv local java@17
-  devenv install go@1.22
-  devenv uninstall go@1.22
+  devenv local java 17
+  devenv install go 1.22
+  devenv uninstall go 1.22
   devenv exec -- go version
   eval "$(devenv activate zsh)"
 
@@ -308,77 +308,84 @@ Example:
         ),
         "remove" => Some(
             r#"Usage: devenv remove <tool> <path>
-       devenv remove <tool>@<version> [path]
+       devenv remove <tool-selector> [path]
 
 Removes external runtime registrations. Runtime files are not deleted.
+Use the compact selector form, such as java@17, when removing by registered version instead of by path.
 
 Example:
   devenv remove go /usr/local/go"#,
         ),
         "install" => Some(
-            r#"Usage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]
-       devenv install <tool> <version> [provider-or-channel] [--dry-run]
+            r#"Usage: devenv install <tool> <version> [provider-or-channel] [--dry-run]
 
 Installs a runtime into DevEnv-owned storage. Remote metadata must be configured for installable tools.
 Use --dry-run to resolve the artifact and install path without downloading or writing install state.
 For Java, --distribution selects the JDK distribution. The current direct provider is temurin.
 For Flutter, --channel currently accepts stable only.
+The compact selector form, such as java@21, is also accepted for compatibility.
 
 Example:
-  devenv install go@1.22
-  devenv install java@21 --dry-run --distribution temurin
-  devenv install java 21 temurin --dry-run"#,
+  devenv install go 1.22
+  devenv install java 21 temurin --dry-run
+  devenv install java 21 --dry-run --distribution temurin"#,
         ),
         "uninstall" => Some(
-            r#"Usage: devenv uninstall <tool>@<version>
-       devenv uninstall <tool> <version>
+            r#"Usage: devenv uninstall <tool> <version>
 
 Deletes only DevEnv-owned installs for the current platform. External registrations created with `devenv add` are not deleted.
+The compact selector form, such as java@11.0.24-temurin, is also accepted for compatibility.
 
 Example:
-  devenv uninstall go@1.22
+  devenv uninstall go 1.22
   devenv uninstall java 11.0.24-temurin"#,
         ),
         "local" => Some(
-            r#"Usage: devenv local <tool>@<version> [--dry-run]
+            r#"Usage: devenv local <tool> <version> [--dry-run]
 
 Writes a project-local selection to devenv.toml in the current directory.
+The compact selector form, such as java@17, is also accepted for compatibility.
 
 Example:
-  devenv local java@17"#,
+  devenv local java 17"#,
         ),
         "global" => Some(
-            r#"Usage: devenv global <tool>@<version> [--dry-run]
+            r#"Usage: devenv global <tool> <version> [--dry-run]
 
 Writes a global selection to the file pointed to by DEVENV_GLOBAL_CONFIG.
+The compact selector form, such as node@20, is also accepted for compatibility.
 
 Example:
-  devenv global node@20"#,
+  devenv global node 20"#,
         ),
         "shell" => Some(
-            r#"Usage: devenv shell <tool>@<version> [--dry-run]
+            r#"Usage: devenv shell <tool> <version> [--dry-run]
 
 Prints shell-scoped environment exports for one selected tool.
+The compact selector form, such as python@3.12, is also accepted for compatibility.
 
 Example:
-  eval "$(devenv shell python@3.12)""#,
+  eval "$(devenv shell python 3.12)""#,
         ),
         "use" => Some(
-            r#"Usage: devenv use <tool>@<version> [--scope local|global|shell] [--dry-run]
+            r#"Usage: devenv use <tool> <version> [--scope local|global|shell] [--dry-run]
 
 Selects a tool version. The default scope is local.
+The compact selector form, such as ruby@3.3, is also accepted for compatibility.
 
 Example:
-  devenv use ruby@3.3 --scope local"#,
+  devenv use ruby 3.3 --scope local"#,
         ),
         "current" => Some(
-            r#"Usage: devenv current [<tool>|<tool>@<version>]
+            r#"Usage: devenv current [<tool> [version]]
 
 Shows selected versions after applying CLI, shell, project, and global precedence.
+Passing a tool and version treats it as a CLI override. The compact selector form, such as java@21, is also accepted for compatibility.
 
 Example:
   devenv current
-  devenv current java"#,
+  devenv current java
+  devenv current java 21"#,
         ),
         "list" => Some(
             r#"Usage: devenv list <tool>
@@ -553,7 +560,7 @@ where
         return Ok(());
     }
 
-    let (spec, dry_run) = parse_scoped_write_args(args)?;
+    let (spec, dry_run) = parse_scoped_write_args(scope.command_name(), args)?;
     apply_scope(scope, spec, dry_run, stdout, context)
 }
 
@@ -587,9 +594,9 @@ where
         return Ok(());
     }
 
-    if args.len() > 1 {
+    if args.len() > 2 {
         return Err(CliError::usage(
-            "usage: devenv current [<tool>|<tool>@<version>]".to_owned(),
+            "usage: devenv current [<tool> [version]]".to_owned(),
         ));
     }
 
@@ -601,8 +608,8 @@ where
         .transpose()?
         .flatten();
 
-    match args.first() {
-        Some(selector) if selector.contains('@') => {
+    match args {
+        [selector] if selector.contains('@') => {
             let spec = parse_tool_spec(selector)?;
             let resolved = resolve_single_selection(
                 spec.tool().clone(),
@@ -615,7 +622,21 @@ where
             write_selection(stdout, &resolved)?;
             Ok(())
         }
-        Some(selector) => {
+        [tool, version] => {
+            let spec_arg = format!("{tool}@{version}");
+            let spec = parse_tool_spec(&spec_arg)?;
+            let resolved = resolve_single_selection(
+                spec.tool().clone(),
+                Some(spec.requirement().clone()),
+                project_config.as_ref(),
+                global_config.as_ref(),
+                context,
+            )?
+            .ok_or_else(|| missing_selection_error(spec.tool()))?;
+            write_selection(stdout, &resolved)?;
+            Ok(())
+        }
+        [selector] => {
             let tool = ToolName::new(selector).map_err(CoreError::from)?;
             let resolved = resolve_single_selection(
                 tool.clone(),
@@ -628,7 +649,7 @@ where
             write_selection(stdout, &resolved)?;
             Ok(())
         }
-        None => {
+        [] => {
             let tools = collect_configured_tools(
                 project_config.as_ref(),
                 global_config.as_ref(),
@@ -636,7 +657,7 @@ where
             );
             if tools.is_empty() {
                 return Err(CliError::runtime(
-                    "no versions selected. Run `devenv local java@17`, `devenv global go@1.22.5`, or `eval \"$(devenv shell java@17)\"`.",
+                    "no versions selected. Run `devenv local java 17`, `devenv global go 1.22.5`, or `eval \"$(devenv shell java 17)\"`.",
                 ));
             }
 
@@ -658,10 +679,13 @@ where
                 Ok(())
             } else {
                 Err(CliError::runtime(
-                    "no versions selected. Run `devenv local java@17`, `devenv global go@1.22.5`, or `eval \"$(devenv shell java@17)\"`.",
+                    "no versions selected. Run `devenv local java 17`, `devenv global go 1.22.5`, or `eval \"$(devenv shell java 17)\"`.",
                 ))
             }
         }
+        _ => Err(CliError::usage(
+            "usage: devenv current [<tool> [version]]".to_owned(),
+        )),
     }
 }
 
@@ -693,7 +717,7 @@ where
 
     if selections.is_empty() {
         return Err(CliError::runtime(
-            "no versions selected. Run `devenv local java@17`, `devenv global go@1.22.5`, or `eval \"$(devenv shell java@17)\"` before `devenv exec -- <command>`.",
+            "no versions selected. Run `devenv local java 17`, `devenv global go 1.22.5`, or `eval \"$(devenv shell java 17)\"` before `devenv exec -- <command>`.",
         ));
     }
 
@@ -873,7 +897,7 @@ where
 
     if args.is_empty() || args.len() > 2 {
         return Err(CliError::usage(
-            "usage: devenv remove <tool> <path>\n       devenv remove <tool>@<version> [path]"
+            "usage: devenv remove <tool> <path>\n       devenv remove <tool-selector> [path]"
                 .to_owned(),
         ));
     }
@@ -8042,31 +8066,50 @@ fn collect_configured_tools<'a>(
     tools
 }
 
-fn parse_scoped_write_args(args: &[String]) -> Result<(ToolSpec, bool), CliError> {
-    let mut spec = None;
+fn parse_scoped_write_args(
+    command_name: &str,
+    args: &[String],
+) -> Result<(ToolSpec, bool), CliError> {
+    let usage = scoped_write_usage(command_name);
+    let mut positionals = Vec::new();
     let mut dry_run = false;
 
     for arg in args {
         match arg.as_str() {
             "--dry-run" => dry_run = true,
-            value if spec.is_none() => spec = Some(parse_tool_spec(value)?),
-            value => {
+            value if value.starts_with('-') => {
                 return Err(CliError::usage(format!(
-                    "unexpected argument `{value}`\nusage: devenv local <tool>@<version>"
+                    "unknown {command_name} option `{value}`\n{usage}"
                 )));
             }
+            value => positionals.push(value),
         }
     }
 
-    let spec = spec.ok_or_else(|| {
-        CliError::usage("missing tool spec\nusage: devenv local <tool>@<version>".to_owned())
-    })?;
+    let spec_arg = parse_tool_version_positionals(&positionals, &usage)?;
+    let spec = parse_tool_spec(&spec_arg)?;
 
     Ok((spec, dry_run))
 }
 
+fn scoped_write_usage(command_name: &str) -> String {
+    format!("usage: devenv {command_name} <tool> <version> [--dry-run]")
+}
+
+fn parse_tool_version_positionals(positionals: &[&str], usage: &str) -> Result<String, CliError> {
+    match positionals {
+        [spec] if spec.contains('@') => Ok((*spec).to_owned()),
+        [tool, version] if !tool.contains('@') => Ok(format!("{tool}@{version}")),
+        [] => Err(CliError::usage(format!(
+            "missing tool and version\n{usage}"
+        ))),
+        _ => Err(CliError::usage(usage.to_owned())),
+    }
+}
+
 fn parse_use_args(args: &[String]) -> Result<(ToolSpec, ScopeCommand, bool), CliError> {
-    let mut spec = None;
+    let usage = "usage: devenv use <tool> <version> [--scope local|global|shell] [--dry-run]";
+    let mut positionals = Vec::new();
     let mut scope = ScopeCommand::Local;
     let mut dry_run = false;
     let mut index = 0;
@@ -8088,24 +8131,20 @@ fn parse_use_args(args: &[String]) -> Result<(ToolSpec, ScopeCommand, bool), Cli
                 scope = parse_scope(value.trim_start_matches("--scope="))?;
                 index += 1;
             }
-            value if spec.is_none() => {
-                spec = Some(parse_tool_spec(value)?);
-                index += 1;
+            value if value.starts_with('-') => {
+                return Err(CliError::usage(format!(
+                    "unknown use option `{value}`\n{usage}"
+                )));
             }
             value => {
-                return Err(CliError::usage(format!(
-                    "unexpected argument `{value}`\nusage: devenv use <tool>@<version> [--scope local|global|shell]"
-                )));
+                positionals.push(value);
+                index += 1;
             }
         }
     }
 
-    let spec = spec.ok_or_else(|| {
-        CliError::usage(
-            "missing tool spec\nusage: devenv use <tool>@<version> [--scope local|global|shell]"
-                .to_owned(),
-        )
-    })?;
+    let spec_arg = parse_tool_version_positionals(&positionals, usage)?;
+    let spec = parse_tool_spec(&spec_arg)?;
 
     Ok((spec, scope, dry_run))
 }
@@ -8140,13 +8179,13 @@ fn shell_quote(value: &str) -> String {
 
 fn missing_selection_error(tool: &ToolName) -> CliError {
     CliError::runtime(format!(
-        "no version selected for {tool}. Run `devenv local {tool}@<version>`, `devenv global {tool}@<version>`, or `eval \"$(devenv shell {tool}@<version>)\"`."
+        "no version selected for {tool}. Run `devenv local {tool} <version>`, `devenv global {tool} <version>`, or `eval \"$(devenv shell {tool} <version>)\"`."
     ))
 }
 
 fn missing_runtime_error(tool: &ToolName, requirement: &VersionRequirement) -> CliError {
     CliError::runtime(format!(
-        "{}@{} is selected but not installed or registered.\nRun `devenv add {} <path>` for an existing runtime, `devenv install {}@{}` for a DevEnv-owned runtime, or `devenv list {}` to inspect known runtimes.",
+        "{} {} is selected but not installed or registered.\nRun `devenv add {} <path>` for an existing runtime, `devenv install {} {}` for a DevEnv-owned runtime, or `devenv list {}` to inspect known runtimes.",
         tool,
         requirement.raw(),
         tool,
@@ -8207,7 +8246,7 @@ impl DoctorReport {
                 "install store",
                 "install store directory does not exist yet",
                 Some(home.installs_dir()),
-                Some("run `devenv install <tool>@<version>` or `devenv shim init`"),
+                Some("run `devenv install <tool> <version>` or `devenv shim init`"),
             ));
         }
 
@@ -8294,7 +8333,7 @@ impl DoctorReport {
                 "project config",
                 "no project config found from current directory",
                 Some(context.current_dir.clone()),
-                Some("run `devenv local <tool>@<version>` to create one"),
+                Some("run `devenv local <tool> <version>` to create one"),
             )),
             Err(error) => checks.push(DoctorCheck::error(
                 "project config",
@@ -8316,7 +8355,7 @@ impl DoctorReport {
                     "global config",
                     "global config path is configured but file does not exist",
                     Some(path.clone()),
-                    Some("run `devenv global <tool>@<version>`"),
+                    Some("run `devenv global <tool> <version>`"),
                 )),
                 Err(error) => checks.push(DoctorCheck::error(
                     "global config",

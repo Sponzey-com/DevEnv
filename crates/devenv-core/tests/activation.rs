@@ -193,7 +193,7 @@ fn missing_selected_runtime_reports_add_and_install_guidance() {
     .expect_err("activation should fail");
     let message = error.to_string();
 
-    assert!(message.contains("java@17 is selected but not installed or registered"));
+    assert!(message.contains("java 17 is selected but not installed or registered"));
     assert!(message.contains("devenv add java <path>"));
-    assert!(message.contains("devenv install java@17"));
+    assert!(message.contains("devenv install java 17"));
 }
