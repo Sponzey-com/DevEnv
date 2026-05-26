@@ -47,6 +47,9 @@ fn help_subcommand_prints_command_usage() {
         .stdout(predicate::str::contains(
             "Usage: devenv install <tool>@<version>",
         ))
+        .stdout(predicate::str::contains(
+            "devenv install <tool> <version> [provider-or-channel]",
+        ))
         .stdout(predicate::str::contains("DevEnv-owned storage"))
         .stderr(predicate::str::is_empty());
 
@@ -3557,6 +3560,43 @@ fn install_java_dry_run_prints_temurin_plan_without_writing_install_or_download_
         .stdout(predicate::str::contains("provider temurin"))
         .stdout(predicate::str::contains("checksum sha256:"))
         .stdout(predicate::str::contains("install_path "))
+        .stdout(predicate::str::contains("dry_run true"))
+        .stderr(predicate::str::is_empty());
+
+    assert!(
+        !devenv_home.join("installs").exists(),
+        "dry-run must not write install store"
+    );
+    assert!(
+        !devenv_home.join("cache/downloads").exists(),
+        "dry-run must not write download cache"
+    );
+}
+
+#[test]
+fn install_accepts_space_separated_java_version_and_distribution() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_java_archive(temp.path());
+    let metadata = write_java_temurin_release_metadata_fixture(temp.path(), &archive);
+    let devenv_home = temp.path().join("devenv-home");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_JAVA_TEMURIN_RELEASE_METADATA", &metadata)
+        .arg("install")
+        .arg("java")
+        .arg("21")
+        .arg("temurin")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Install plan"))
+        .stdout(predicate::str::contains("tool java"))
+        .stdout(predicate::str::contains("requested java@21"))
+        .stdout(predicate::str::contains("resolved 21.0.2-temurin"))
+        .stdout(predicate::str::contains("provider temurin"))
         .stdout(predicate::str::contains("dry_run true"))
         .stderr(predicate::str::is_empty());
 

@@ -70,6 +70,7 @@ use devenv_tools::{
 };
 
 pub const COMMAND_NAME: &str = "devenv";
+const INSTALL_USAGE: &str = "usage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]";
 const GLOBAL_CONFIG_ENV: &str = "DEVENV_GLOBAL_CONFIG";
 const SHELL_ENV_PREFIX: &str = "DEVENV_TOOL_";
 const JAVA_CANDIDATE_PATHS_ENV: &str = "DEVENV_JAVA_CANDIDATE_PATHS";
@@ -315,6 +316,7 @@ Example:
         ),
         "install" => Some(
             r#"Usage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]
+       devenv install <tool> <version> [provider-or-channel] [--dry-run]
 
 Installs a runtime into DevEnv-owned storage. Remote metadata must be configured for installable tools.
 Use --dry-run to resolve the artifact and install path without downloading or writing install state.
@@ -323,7 +325,8 @@ For Flutter, --channel currently accepts stable only.
 
 Example:
   devenv install go@1.22
-  devenv install java@21 --dry-run --distribution temurin"#,
+  devenv install java@21 --dry-run --distribution temurin
+  devenv install java 21 temurin --dry-run"#,
         ),
         "uninstall" => Some(
             r#"Usage: devenv uninstall <tool>@<version>
@@ -3247,7 +3250,7 @@ where
     }
 
     let (spec_arg, options) = parse_install_args(args)?;
-    let spec = parse_tool_spec(spec_arg)?;
+    let spec = parse_tool_spec(&spec_arg)?;
     if spec.tool().as_str() != "java" {
         reject_java_distribution_option_for_tool(spec.tool(), options.distribution.as_deref())?;
     }
@@ -3285,15 +3288,12 @@ struct InstallOptions {
     channel: Option<String>,
 }
 
-fn parse_install_args(args: &[String]) -> Result<(&str, InstallOptions), CliError> {
+fn parse_install_args(args: &[String]) -> Result<(String, InstallOptions), CliError> {
     if args.is_empty() {
-        return Err(CliError::usage(
-            "usage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]"
-                .to_owned(),
-        ));
+        return Err(CliError::usage(INSTALL_USAGE.to_owned()));
     }
 
-    let mut spec = None;
+    let mut positionals = Vec::new();
     let mut options = InstallOptions::default();
     let mut index = 0;
     while index < args.len() {
@@ -3305,49 +3305,102 @@ fn parse_install_args(args: &[String]) -> Result<(&str, InstallOptions), CliErro
             }
             "--distribution" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err(CliError::usage(
-                        "`--distribution` requires a value\nusage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]"
-                            .to_owned(),
-                    ));
+                    return Err(CliError::usage(format!(
+                        "`--distribution` requires a value\n{INSTALL_USAGE}"
+                    )));
                 };
                 options.distribution = Some(value.clone());
                 index += 2;
             }
             "--channel" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err(CliError::usage(
-                        "`--channel` requires a value\nusage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]"
-                            .to_owned(),
-                    ));
+                    return Err(CliError::usage(format!(
+                        "`--channel` requires a value\n{INSTALL_USAGE}"
+                    )));
                 };
                 options.channel = Some(value.clone());
                 index += 2;
             }
             value if value.starts_with('-') => {
                 return Err(CliError::usage(format!(
-                    "unknown install option `{value}`\nusage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]"
+                    "unknown install option `{value}`\n{INSTALL_USAGE}"
                 )));
             }
             value => {
-                if spec.replace(value).is_some() {
-                    return Err(CliError::usage(
-                        "usage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]"
-                            .to_owned(),
-                    ));
-                }
+                positionals.push(value);
                 index += 1;
             }
         }
     }
 
-    let Some(spec) = spec else {
-        return Err(CliError::usage(
-            "usage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]"
-                .to_owned(),
-        ));
-    };
+    let spec = normalize_install_target(&positionals, &mut options)?;
 
     Ok((spec, options))
+}
+
+fn normalize_install_target(
+    positionals: &[&str],
+    options: &mut InstallOptions,
+) -> Result<String, CliError> {
+    match positionals {
+        [] => Err(CliError::usage(INSTALL_USAGE.to_owned())),
+        [spec] if spec.contains('@') => Ok((*spec).to_owned()),
+        [tool, version] if !tool.contains('@') => Ok(format!("{tool}@{version}")),
+        [tool, version, selector] if !tool.contains('@') => {
+            set_install_selector_from_positional(tool, selector, options)?;
+            Ok(format!("{tool}@{version}"))
+        }
+        [spec, selector] if spec.contains('@') => {
+            let Some((tool, _version)) = spec.split_once('@') else {
+                return Err(CliError::usage(INSTALL_USAGE.to_owned()));
+            };
+            set_install_selector_from_positional(tool, selector, options)?;
+            Ok((*spec).to_owned())
+        }
+        _ => Err(CliError::usage(INSTALL_USAGE.to_owned())),
+    }
+}
+
+fn set_install_selector_from_positional(
+    tool: &str,
+    selector: &str,
+    options: &mut InstallOptions,
+) -> Result<(), CliError> {
+    match tool.to_ascii_lowercase().as_str() {
+        "java" => set_positional_option(
+            "--distribution",
+            &mut options.distribution,
+            selector,
+            "Java distribution",
+        ),
+        "flutter" => set_positional_option(
+            "--channel",
+            &mut options.channel,
+            selector,
+            "Flutter channel",
+        ),
+        _ => Err(CliError::usage(format!(
+            "unexpected install selector `{selector}` for `{tool}`; positional selectors are supported for Java distributions and Flutter channels\n{INSTALL_USAGE}"
+        ))),
+    }
+}
+
+fn set_positional_option(
+    flag: &str,
+    option: &mut Option<String>,
+    value: &str,
+    label: &str,
+) -> Result<(), CliError> {
+    if let Some(existing) = option.as_deref() {
+        if existing != value {
+            return Err(CliError::usage(format!(
+                "conflicting {label} values: positional `{value}` and {flag} `{existing}`"
+            )));
+        }
+    } else {
+        *option = Some(value.to_owned());
+    }
+    Ok(())
 }
 
 fn run_uninstall_command<O>(
