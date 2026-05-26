@@ -63,6 +63,9 @@ fn help_subcommand_prints_command_usage() {
             "Usage: devenv uninstall <tool>@<version>",
         ))
         .stdout(predicate::str::contains(
+            "devenv uninstall <tool> <version>",
+        ))
+        .stdout(predicate::str::contains(
             "Deletes only DevEnv-owned installs",
         ))
         .stderr(predicate::str::is_empty());
@@ -3722,6 +3725,43 @@ fn uninstall_removes_devenv_owned_install_directory() {
         .assert()
         .success()
         .stdout(predicate::str::contains("go 1.22.5 installed").not());
+}
+
+#[test]
+fn uninstall_accepts_space_separated_java_version() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = write_fake_java_archive(temp.path());
+    let metadata = write_java_release_metadata_fixture(temp.path(), &archive);
+    let devenv_home = temp.path().join("devenv-home");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_JAVA_RELEASE_METADATA", &metadata)
+        .env("DEVENV_JAVA_CANDIDATE_PATHS", "")
+        .arg("install")
+        .arg("java@17")
+        .assert()
+        .success();
+
+    let install_root = find_single_install_root(&devenv_home, "java", "17.0.11-temurin");
+    assert!(install_root.join("devenv-install.toml").is_file());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_JAVA_CANDIDATE_PATHS", "")
+        .arg("uninstall")
+        .arg("java")
+        .arg("17.0.11-temurin")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("uninstalled java 17.0.11-temurin"))
+        .stdout(predicate::str::contains(install_root.to_string_lossy()));
+
+    assert!(!install_root.exists());
 }
 
 #[test]

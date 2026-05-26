@@ -71,6 +71,7 @@ use devenv_tools::{
 
 pub const COMMAND_NAME: &str = "devenv";
 const INSTALL_USAGE: &str = "usage: devenv install <tool>@<version> [--dry-run] [--distribution temurin] [--channel stable]";
+const UNINSTALL_USAGE: &str = "usage: devenv uninstall <tool>@<version>";
 const GLOBAL_CONFIG_ENV: &str = "DEVENV_GLOBAL_CONFIG";
 const SHELL_ENV_PREFIX: &str = "DEVENV_TOOL_";
 const JAVA_CANDIDATE_PATHS_ENV: &str = "DEVENV_JAVA_CANDIDATE_PATHS";
@@ -330,11 +331,13 @@ Example:
         ),
         "uninstall" => Some(
             r#"Usage: devenv uninstall <tool>@<version>
+       devenv uninstall <tool> <version>
 
 Deletes only DevEnv-owned installs for the current platform. External registrations created with `devenv add` are not deleted.
 
 Example:
-  devenv uninstall go@1.22"#,
+  devenv uninstall go@1.22
+  devenv uninstall java 11.0.24-temurin"#,
         ),
         "local" => Some(
             r#"Usage: devenv local <tool>@<version> [--dry-run]
@@ -3416,13 +3419,8 @@ where
         return Ok(());
     }
 
-    if args.len() != 1 {
-        return Err(CliError::usage(
-            "usage: devenv uninstall <tool>@<version>".to_owned(),
-        ));
-    }
-
-    let spec = parse_tool_spec(&args[0])?;
+    let spec_arg = parse_uninstall_args(args)?;
+    let spec = parse_tool_spec(&spec_arg)?;
     match spec.tool().as_str() {
         "java" => run_uninstall_with_matcher(
             spec.tool(),
@@ -3491,6 +3489,14 @@ where
             "`devenv uninstall` is not implemented for `{}` yet",
             spec.tool()
         ))),
+    }
+}
+
+fn parse_uninstall_args(args: &[String]) -> Result<String, CliError> {
+    match args {
+        [spec] if spec.contains('@') => Ok(spec.clone()),
+        [tool, version] if !tool.contains('@') => Ok(format!("{tool}@{version}")),
+        _ => Err(CliError::usage(UNINSTALL_USAGE.to_owned())),
     }
 }
 
