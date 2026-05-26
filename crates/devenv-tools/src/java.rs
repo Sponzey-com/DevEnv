@@ -183,7 +183,8 @@ impl JavaRuntimeDiscovery {
 }
 
 pub fn validate_jdk_home(root: impl AsRef<Path>) -> CoreResult<JavaRuntime> {
-    let root = root.as_ref();
+    let root = canonical_jdk_home(root.as_ref())?;
+    let root = root.as_path();
 
     if !root.is_dir() {
         return Err(CoreError::message(format!(
@@ -700,6 +701,53 @@ fn discover_candidate_root(root: &Path) -> CoreResult<Vec<JavaRuntime>> {
     Ok(runtimes)
 }
 
+fn canonical_jdk_home(root: &Path) -> CoreResult<PathBuf> {
+    if looks_like_jdk_home(root) {
+        return Ok(root.to_path_buf());
+    }
+
+    if !root.is_dir() {
+        return Ok(root.to_path_buf());
+    }
+
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(root).map_err(|error| {
+        CoreError::message(format!(
+            "failed to scan Java runtime `{}`: {error}",
+            root.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            CoreError::message(format!(
+                "failed to scan Java runtime `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        let path = entry.path();
+        if looks_like_jdk_home(&path) {
+            candidates.push(path);
+            continue;
+        }
+
+        let macos_home = path.join("Contents/Home");
+        if looks_like_jdk_home(&macos_home) {
+            candidates.push(macos_home);
+        }
+    }
+
+    if candidates.len() == 1 {
+        Ok(candidates.remove(0))
+    } else {
+        Ok(root.to_path_buf())
+    }
+}
+
+fn looks_like_jdk_home(root: &Path) -> bool {
+    root.join("bin/java").is_file()
+        && root.join("bin/javac").is_file()
+        && root.join("release").is_file()
+}
+
 fn java_runtime_from_registered(runtime: RegisteredRuntime) -> JavaRuntime {
     JavaRuntime::new(
         runtime.version().clone(),
@@ -724,9 +772,12 @@ fn java_runtime_from_installation_with_distribution(
     installation: Installation,
     distribution: ToolDistribution,
 ) -> JavaRuntime {
+    let root = canonical_jdk_home(installation.root())
+        .unwrap_or_else(|_| installation.root().to_path_buf());
+
     JavaRuntime::new(
         installation.version().clone(),
-        installation.root(),
+        root,
         distribution,
         JavaRuntimeSource::Installed,
         Some(installation.platform()),

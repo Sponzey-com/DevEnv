@@ -7,8 +7,8 @@ use devenv_core::{
     ToolName, Version, VersionMatcher, VersionRequirement,
 };
 use devenv_tools::{
-    JavaRuntimeDiscovery, JavaRuntimeSource, JavaToolAdapter, JavaVersionMatcher,
-    normalize_java_version, validate_jdk_home,
+    JavaInstalledRuntimeValidator, JavaRuntimeDiscovery, JavaRuntimeSource, JavaToolAdapter,
+    JavaVersionMatcher, normalize_java_version, validate_jdk_home,
 };
 
 #[test]
@@ -54,6 +54,51 @@ fn macos_bundle_home_layout_is_discovered() {
         runtimes[0].distribution(),
         &ToolDistribution::named("Eclipse Adoptium")
     );
+}
+
+#[test]
+fn java_install_validator_accepts_top_level_macos_bundle_archive_layout() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    create_fake_jdk(
+        &temp.path().join("jdk-11.0.24+8/Contents"),
+        "Home",
+        "11.0.24",
+        Some("Eclipse Adoptium"),
+    );
+
+    devenv_core::InstalledRuntimeValidator::validate(&JavaInstalledRuntimeValidator, temp.path())
+        .expect("top-level macOS JDK archive layout should validate");
+}
+
+#[test]
+fn installed_java_runtime_uses_nested_macos_home_root() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let home = create_fake_jdk(
+        &temp.path().join("jdk-11.0.24+8/Contents"),
+        "Home",
+        "11.0.24",
+        Some("Eclipse Adoptium"),
+    );
+    let tool = ToolName::new("java").expect("tool should be valid");
+    let platform = Platform::new(OperatingSystem::Macos, Architecture::Arm64);
+    let registry = InMemoryRuntimeRegistry::default();
+    let mut install_store = InMemoryInstallStore::default();
+    install_store
+        .add_installation(Installation::new(
+            tool,
+            Version::new("11.0.24").expect("version should be valid"),
+            platform,
+            temp.path(),
+        ))
+        .expect("installation should be added");
+
+    let runtimes = JavaRuntimeDiscovery::new()
+        .discover(platform, &registry, &install_store)
+        .expect("discovery should succeed");
+
+    assert!(runtimes.iter().any(|runtime| {
+        runtime.root() == home.as_path() && runtime.source() == &JavaRuntimeSource::Installed
+    }));
 }
 
 #[test]

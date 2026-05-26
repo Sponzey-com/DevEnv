@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Cursor;
 
 use devenv_adapters::archive::ManifestArchiveExtractor;
 use devenv_adapters::checksum::Sha256ChecksumVerifier;
@@ -55,6 +56,39 @@ fn manifest_archive_extractor_rejects_path_traversal_before_writing() {
 }
 
 #[test]
+fn manifest_archive_extractor_extracts_real_tar_gz_archive() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let archive = temp.path().join("runtime.tar.gz");
+    let destination = temp.path().join("extract");
+    write_tar_gz_archive(
+        &archive,
+        [
+            ("jdk-11/Contents/Home/bin/java", b"java".as_slice()),
+            ("jdk-11/Contents/Home/bin/javac", b"javac".as_slice()),
+            (
+                "jdk-11/Contents/Home/release",
+                b"JAVA_VERSION=\"11.0.24\"\n".as_slice(),
+            ),
+        ],
+    );
+
+    let manifest = ManifestArchiveExtractor
+        .extract(&archive, &destination, ArchiveType::TarGz)
+        .expect("real tar.gz archive should extract");
+
+    assert!(
+        manifest
+            .entries()
+            .contains(&std::path::PathBuf::from("jdk-11/Contents/Home/bin/java"))
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("jdk-11/Contents/Home/bin/java"))
+            .expect("java should be extracted"),
+        "java"
+    );
+}
+
+#[test]
 fn plain_file_extractor_copies_single_binary_to_destination() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let artifact = temp.path().join("terraform");
@@ -70,6 +104,28 @@ fn plain_file_extractor_copies_single_binary_to_destination() {
         fs::read_to_string(destination.join("terraform")).expect("binary should be readable"),
         "binary"
     );
+}
+
+fn write_tar_gz_archive<const N: usize>(path: &std::path::Path, entries: [(&str, &[u8]); N]) {
+    let file = fs::File::create(path).expect("tar.gz should be created");
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+
+    for (path, contents) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, path, Cursor::new(contents))
+            .expect("tar entry should be appended");
+    }
+
+    archive
+        .into_inner()
+        .expect("tar archive should finish")
+        .finish()
+        .expect("gzip archive should finish");
 }
 
 #[test]
