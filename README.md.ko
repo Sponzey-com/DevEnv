@@ -214,8 +214,8 @@ Release workflow는 다음 target을 빌드합니다.
 
 - `aarch64-apple-darwin`
 - `x86_64-apple-darwin`
-- `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-musl`
+- `aarch64-unknown-linux-musl`
 - `x86_64-pc-windows-msvc`
 
 Artifact 이름:
@@ -231,7 +231,9 @@ SHA256SUMS
 - `devenv` 또는 `devenv.exe`
 - `USER_GUIDE.md`
 
-Package smoke는 package target이 build host와 일치할 때만 binary를 실행합니다. `aarch64-unknown-linux-gnu` 같은 cross-compiled artifact는 압축 해제와 non-empty binary 여부를 확인하지만 기본적으로 실행하지 않습니다.
+Linux release artifact는 musl target을 사용합니다. 그래서 npm 설치 시 사용자 Linux 배포판의 glibc 버전에 의존하지 않습니다.
+
+Package smoke는 package target이 build host와 일치할 때만 binary를 실행합니다. `aarch64-unknown-linux-musl` 같은 cross-compiled artifact는 압축 해제와 non-empty binary 여부를 확인하지만 기본적으로 실행하지 않습니다.
 
 Host target용 local package 빌드:
 

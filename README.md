@@ -214,8 +214,8 @@ The release workflow builds these targets:
 
 - `aarch64-apple-darwin`
 - `x86_64-apple-darwin`
-- `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-musl`
+- `aarch64-unknown-linux-musl`
 - `x86_64-pc-windows-msvc`
 
 Artifacts are named:
@@ -231,7 +231,9 @@ Each package contains:
 - `devenv` or `devenv.exe`
 - `USER_GUIDE.md`
 
-Package smoke executes the binary only when the package target matches the build host. Cross-compiled artifacts such as `aarch64-unknown-linux-gnu` are unpacked and checked, but not executed by default.
+Linux release artifacts use musl targets so npm installs do not depend on the glibc version available on the user's distribution.
+
+Package smoke executes the binary only when the package target matches the build host. Cross-compiled artifacts such as `aarch64-unknown-linux-musl` are unpacked and checked, but not executed by default.
 
 Build a local package for the host target:
 

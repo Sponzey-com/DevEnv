@@ -21,8 +21,8 @@ function targetTriple() {
       x64: "x86_64-apple-darwin",
     },
     linux: {
-      arm64: "aarch64-unknown-linux-gnu",
-      x64: "x86_64-unknown-linux-gnu",
+      arm64: "aarch64-unknown-linux-musl",
+      x64: "x86_64-unknown-linux-musl",
     },
     win32: {
       x64: "x86_64-pc-windows-msvc",

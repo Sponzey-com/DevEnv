@@ -9,6 +9,19 @@ package_dir="$(scripts/package-npm.sh)"
 node --check "$package_dir/bin/devenv.js"
 node --check "$package_dir/scripts/install.js"
 
+if ! grep -q 'x86_64-unknown-linux-musl' "$package_dir/scripts/install.js"; then
+    echo "npm package smoke failed: Linux x64 installer target must use musl" >&2
+    exit 1
+fi
+if ! grep -q 'aarch64-unknown-linux-musl' "$package_dir/scripts/install.js"; then
+    echo "npm package smoke failed: Linux arm64 installer target must use musl" >&2
+    exit 1
+fi
+if grep -q 'unknown-linux-gnu' "$package_dir/scripts/install.js"; then
+    echo "npm package smoke failed: Linux installer target must not use glibc-linked gnu artifacts" >&2
+    exit 1
+fi
+
 expected_version="$(sed -n '/^\[workspace\.package\]$/,/^\[/{s/^version = "\(.*\)"/\1/p;}' Cargo.toml | head -n 1)"
 actual_version="$(node -e "process.stdout.write(require('./$package_dir/package.json').version)")"
 if [ "$expected_version" != "$actual_version" ]; then

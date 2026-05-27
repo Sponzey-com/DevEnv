@@ -15,8 +15,8 @@ The release workflow builds:
 
 - `aarch64-apple-darwin`
 - `x86_64-apple-darwin`
-- `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu` through `cross`
+- `x86_64-unknown-linux-musl` through `cross`
+- `aarch64-unknown-linux-musl` through `cross`
 - `x86_64-pc-windows-msvc`
 
 Artifacts are named:
@@ -40,7 +40,9 @@ devenv shim rehash
 devenv doctor
 ```
 
-Executable smoke runs only when the package target matches the build host target. Cross-compiled packages such as `aarch64-unknown-linux-gnu` on an `x86_64-unknown-linux-gnu` runner are still unpacked and checked for a non-empty binary, but the binary is not executed by default.
+Linux artifacts use musl targets to avoid requiring the user's Linux distribution to provide the same or newer glibc version as the release build runner.
+
+Executable smoke runs only when the package target matches the build host target. Cross-compiled packages such as `aarch64-unknown-linux-musl` on an `x86_64-unknown-linux-gnu` runner are still unpacked and checked for a non-empty binary, but the binary is not executed by default.
 
 Control release smoke explicitly with:
 
@@ -204,10 +206,11 @@ DEVENV_RELEASE_TARGET=aarch64-apple-darwin \
 scripts/package-release.sh
 ```
 
-Linux arm64 cross packaging uses:
+Linux cross packaging uses:
 
 ```sh
-DEVENV_USE_CROSS=1 DEVENV_RELEASE_TARGET=aarch64-unknown-linux-gnu scripts/package-release.sh
+DEVENV_USE_CROSS=1 DEVENV_RELEASE_TARGET=x86_64-unknown-linux-musl scripts/package-release.sh
+DEVENV_USE_CROSS=1 DEVENV_RELEASE_TARGET=aarch64-unknown-linux-musl scripts/package-release.sh
 ```
 
 ## Checksums
