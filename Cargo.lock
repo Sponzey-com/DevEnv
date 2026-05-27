@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "devenv-adapters"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "devenv-core",
  "flate2",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "devenv-catalog"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "devenv-adapters",
  "serde",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "devenv-cli"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "assert_cmd",
  "devenv-adapters",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "devenv-core"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "tempfile",
  "toml",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "devenv-tools"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "devenv-core",
  "serde",
