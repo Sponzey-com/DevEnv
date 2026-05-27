@@ -456,6 +456,7 @@ impl VersionSource for GoRemoteReleaseVersionSource {
             .index
             .releases()
             .iter()
+            .filter(|release| !release.artifacts().is_empty())
             .filter(|release| release.metadata_field("stable") != Some("false"))
             .filter(|release| release.metadata_field("yanked") != Some("true"))
             .map(|release| release.version().clone())
@@ -593,6 +594,7 @@ impl VersionSource for GoReleaseVersionSource {
             .metadata
             .releases()
             .iter()
+            .filter(|release| release.files().iter().any(|file| file.kind() == "archive"))
             .filter(|release| release.stable())
             .map(|release| release.version().clone())
             .collect::<Vec<_>>();
@@ -931,33 +933,33 @@ fn go_remote_artifact_from_official_file(
 ) -> Option<CoreResult<ResolvedArtifact>> {
     let platform = go_platform_from_official_file(&file.os, &file.arch)?;
 
-    let result = (|| {
-        let file_version = file
-            .version
-            .as_deref()
-            .map(normalize_go_version)
-            .transpose()?;
-        if let Some(file_version) = file_version {
-            if file_version != release_version.raw() {
-                return Err(CoreError::message(format!(
-                    "invalid Go official metadata: file `{}` has version `{}` but belongs to release `{}`",
-                    file.filename, file_version, release_version
-                )));
-            }
+    let file_version = file
+        .version
+        .as_deref()
+        .map(normalize_go_version)
+        .transpose();
+    let file_version = match file_version {
+        Ok(file_version) => file_version,
+        Err(error) => return Some(Err(error)),
+    };
+    if let Some(file_version) = file_version {
+        if file_version != release_version.raw() {
+            return Some(Err(CoreError::message(format!(
+                "invalid Go official metadata: file `{}` has version `{}` but belongs to release `{}`",
+                file.filename, file_version, release_version
+            ))));
         }
+    }
 
+    let sha256 = file
+        .sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_owned();
+
+    let result = (|| {
         let archive_type = archive_type_for_go_file(&file.filename)?;
-        let sha256 = file
-            .sha256
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                CoreError::message(format!(
-                    "invalid Go official metadata: archive `{}` is missing sha256",
-                    file.filename
-                ))
-            })?;
         let url = file
             .url
             .unwrap_or_else(|| format!("https://go.dev/dl/{}", file.filename));

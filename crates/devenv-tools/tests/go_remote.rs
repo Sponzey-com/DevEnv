@@ -126,6 +126,23 @@ fn list_remote_go_from_official_metadata_returns_stable_normalized_versions() {
 }
 
 #[test]
+fn list_remote_go_from_official_metadata_skips_checksumless_archives() {
+    let tool = ToolName::new("go").expect("tool should be valid");
+    let metadata = GoOfficialReleaseMetadata::parse(official_metadata_with_checksumless_archive())
+        .expect("official metadata should parse");
+    let source = GoRemoteReleaseVersionSource::new(metadata.into_release_index());
+
+    let versions = source
+        .list_versions(&tool)
+        .expect("versions should list")
+        .into_iter()
+        .map(|version| version.raw().to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(versions, vec!["1.23.4"]);
+}
+
+#[test]
 fn resolve_official_macos_arm64_artifact() {
     let artifact = resolve_official_for(OperatingSystem::Macos, Architecture::Arm64);
 
@@ -393,6 +410,42 @@ fn official_metadata() -> &'static str {
     "version": "go1.26rc3",
     "stable": false,
     "files": []
+  }
+]
+"#
+}
+
+fn official_metadata_with_checksumless_archive() -> &'static str {
+    r#"
+[
+  {
+    "version": "go1.23.4",
+    "stable": true,
+    "files": [
+      {
+        "filename": "go1.23.4.darwin-arm64.tar.gz",
+        "os": "darwin",
+        "arch": "arm64",
+        "version": "go1.23.4",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 11,
+        "kind": "archive"
+      }
+    ]
+  },
+  {
+    "version": "go1.5.2",
+    "stable": true,
+    "files": [
+      {
+        "filename": "go1.5.2.darwin-amd64.tar.gz",
+        "os": "darwin",
+        "arch": "amd64",
+        "version": "go1.5.2",
+        "size": 22,
+        "kind": "archive"
+      }
+    ]
   }
 ]
 "#

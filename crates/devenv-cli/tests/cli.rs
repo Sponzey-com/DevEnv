@@ -1396,6 +1396,29 @@ fn list_remote_go_refresh_writes_official_cache_and_offline_reads_it() {
 }
 
 #[test]
+fn list_remote_go_refresh_skips_checksumless_official_archives() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let devenv_home = temp.path().join("devenv-home");
+    let archive = write_fake_go_archive_with_version(temp.path(), "1.23.4");
+    let official =
+        write_go_official_release_metadata_with_checksumless_archive_fixture(temp.path(), &archive);
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("DEVENV_HOME", &devenv_home)
+        .env("DEVENV_GO_OFFICIAL_RELEASE_METADATA", &official)
+        .arg("list-remote")
+        .arg("go")
+        .arg("--refresh")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("go 1.23.4"))
+        .stdout(predicate::str::contains("go 1.5.2").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
 fn list_remote_go_reports_missing_metadata_source() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
 
@@ -4545,6 +4568,60 @@ fn write_go_official_release_metadata_fixture(parent: &Path, archive: &Path) -> 
     "version": "go1.23.3",
     "stable": false,
     "files": []
+  }}
+]
+"#
+        ),
+    )
+    .expect("official release metadata should be written");
+    metadata
+}
+
+fn write_go_official_release_metadata_with_checksumless_archive_fixture(
+    parent: &Path,
+    archive: &Path,
+) -> PathBuf {
+    let metadata = parent.join("go-official-releases-checksumless.json");
+    let url = archive
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let (go_os, go_arch) = current_go_official_platform_for_test();
+    let extension = if go_os == "windows" { "zip" } else { "tar.gz" };
+    fs::write(
+        &metadata,
+        format!(
+            r#"
+[
+  {{
+    "version": "go1.23.4",
+    "stable": true,
+    "files": [
+      {{
+        "filename": "go1.23.4.{go_os}-{go_arch}.{extension}",
+        "os": "{go_os}",
+        "arch": "{go_arch}",
+        "version": "go1.23.4",
+        "kind": "archive",
+        "url": "{url}",
+        "sha256": "8c788a765d2f6f52b0e300efd4d1495e305c1a558058d7c2e92b1793c2f315e9",
+        "size": 34
+      }}
+    ]
+  }},
+  {{
+    "version": "go1.5.2",
+    "stable": true,
+    "files": [
+      {{
+        "filename": "go1.5.2.darwin-amd64.tar.gz",
+        "os": "darwin",
+        "arch": "amd64",
+        "version": "go1.5.2",
+        "kind": "archive",
+        "size": 22
+      }}
+    ]
   }}
 ]
 "#
