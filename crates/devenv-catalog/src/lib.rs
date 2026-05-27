@@ -287,6 +287,7 @@ fn generate_go_payload(
     let path = options.source_dir.join("go/official/releases.json");
     let input = fs::read_to_string(&path)?;
     let mut releases = serde_json::from_str::<Vec<GoOfficialRelease>>(&input)?;
+    releases.retain(|release| is_numeric_go_release_version(&release.version));
     releases.sort_by(|left, right| {
         compare_versions_desc(
             &normalize_go_version(&left.version),
@@ -597,6 +598,14 @@ fn version_key(value: &str) -> Vec<u64> {
 
 fn normalize_go_version(value: &str) -> String {
     value.trim().trim_start_matches("go").to_owned()
+}
+
+fn is_numeric_go_release_version(value: &str) -> bool {
+    let normalized = normalize_go_version(value);
+    !normalized.is_empty()
+        && normalized
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn normalize_node_version(value: &str) -> String {

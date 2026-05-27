@@ -95,6 +95,12 @@ fn parse_official_go_release_metadata_to_normalized_index() {
     assert_eq!(index.provider().as_str(), "official");
     assert_eq!(index.releases().len(), 2);
     assert_eq!(index.releases()[0].version().raw(), "1.23.4");
+    assert!(
+        index
+            .releases()
+            .iter()
+            .all(|release| !release.version().raw().contains("rc"))
+    );
     assert_eq!(
         index.releases()[0].metadata_field("upstream_version"),
         Some("go1.23.4")
@@ -380,6 +386,11 @@ fn official_metadata() -> &'static str {
   },
   {
     "version": "go1.23.5",
+    "stable": false,
+    "files": []
+  },
+  {
+    "version": "go1.26rc3",
     "stable": false,
     "files": []
   }

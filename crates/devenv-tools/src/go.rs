@@ -357,6 +357,7 @@ impl GoOfficialReleaseMetadata {
             ProviderId::new("official").expect("built-in Go provider id should be valid");
         let releases = releases
             .into_iter()
+            .filter(|release| normalize_go_version(&release.version).is_ok())
             .map(|release| go_remote_release_from_official_payload(&tool, &provider, release))
             .collect::<CoreResult<Vec<_>>>()?;
 
