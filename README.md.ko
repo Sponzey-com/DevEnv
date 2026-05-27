@@ -120,15 +120,38 @@ devenv exec -- node --version
 
 ```sh
 eval "$(devenv activate zsh)"
+eval "$(devenv activate bash)"
 java --version
 ```
+
+`devenv local`과 `devenv global`은 버전 선택값을 기록합니다. 부모 shell process의 `PATH`를 직접 바꾸지는 않습니다. `go version` 같은 직접 명령이 바뀌려면 DevEnv shim directory가 `PATH`의 앞쪽에 활성화되어 있어야 합니다.
+
+이 구조는 `goenv`, `jenv`, `pyenv`, `rbenv`와 같은 방식입니다. `local`은 프로젝트 버전 파일을 쓰고, shell 초기화 설정이 shim을 통해 매 명령마다 그 파일을 읽게 합니다.
 
 새 터미널 세션에도 적용하려면 `devenv local`, `devenv global`, `devenv use`가 출력하는 정확한 activation line을 shell profile에 추가해야 합니다.
 
 ```sh
+devenv init bash --write
+devenv init zsh --write
+
+# 수동 대안:
 devenv global java 21
-# 출력되는 "new sessions:" 줄을 ~/.zshrc에 추가합니다.
+# zsh:  출력되는 "new sessions:" 줄을 ~/.zshrc에 추가합니다.
+# bash: 출력되는 "new sessions:" 줄을 ~/.bashrc에 추가합니다.
 ```
+
+Ubuntu/bash 예시:
+
+```sh
+devenv init bash --write
+source ~/.bashrc
+hash -r
+type -a go
+```
+
+`devenv init <shell>`은 shell profile에 들어갈 managed block을 미리 보여주며 파일을 수정하지 않습니다. 실제로 profile을 수정하려면 `--write`를 붙입니다. 기존 DevEnv init block은 중복 추가하지 않고 교체합니다.
+
+첫 번째 `go` 항목은 DevEnv shim directory를 가리켜야 합니다. Linux에서는 보통 `~/.local/share/devenv/shims/go`입니다. 기존 system Go 경로가 여전히 먼저 나오면 `~/.bashrc`에서 DevEnv activation line을 기존 Go `PATH` 설정보다 아래쪽으로 옮기세요.
 
 npm 설치에서는 npm entrypoint가 Node.js wrapper이기 때문에 이 차이가 중요합니다. 출력되는 줄은 native DevEnv binary 경로를 사용하므로 DevEnv shim이 `node`, `npm` 같은 명령까지 안전하게 관리할 수 있습니다.
 

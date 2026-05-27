@@ -217,6 +217,10 @@ where
             run_activate_command(&args[1..], stdout, context)?;
             Ok(0)
         }
+        Some("init") => {
+            run_init_command(&args[1..], stdout, context)?;
+            Ok(0)
+        }
         Some("exec") => run_exec_command(&args[1..], stdout, stderr, context),
         Some(arg) => Err(CliError::usage(format!(
             "unknown command `{arg}`\ntry `{COMMAND_NAME} doctor`, `{COMMAND_NAME} --help`, or `{COMMAND_NAME} --version`"
@@ -264,6 +268,7 @@ Commands:
   provider      Show built-in provider capabilities.
   exec          Run a command with selected tool environments.
   activate      Print shell activation for DevEnv shims.
+  init          Install DevEnv shell activation into a shell profile.
   shim          Manage and dispatch shims.
   doctor        Check DevEnv home, registry, installs, and shims.
   help          Show this help or command-specific help.
@@ -456,6 +461,18 @@ For new terminal sessions, add the exact "new sessions:" line printed by selecti
 Example:
   eval "$(devenv activate zsh)"
   # For new zsh sessions, use the line printed by `devenv global <tool> <version>`"#,
+        ),
+        "init" => Some(
+            r#"Usage: devenv init [zsh|bash|fish|powershell] [--write] [--profile <path>]
+
+Previews or installs a DevEnv-managed activation block into a shell profile.
+By default this command only prints the block and does not modify files.
+Use --write to update the profile. Existing DevEnv init blocks are replaced idempotently.
+
+Examples:
+  devenv init bash
+  devenv init bash --write
+  devenv init zsh --write --profile ~/.zshrc"#,
         ),
         "shim" => Some(
             r#"Usage: devenv shim <init|rehash|dispatch>
@@ -3650,6 +3667,272 @@ where
         render_devenv_shell_function(syntax, &devenv_command)
     )?;
     Ok(())
+}
+
+const DEVENV_INIT_BLOCK_BEGIN: &str = "# >>> devenv init >>>";
+const DEVENV_INIT_BLOCK_END: &str = "# <<< devenv init <<<";
+
+#[derive(Debug, Clone)]
+struct InitOptions {
+    shell_name: String,
+    syntax: ShellSyntax,
+    profile_path: PathBuf,
+    write: bool,
+}
+
+fn run_init_command<O>(
+    args: &[String],
+    stdout: &mut O,
+    context: &CommandContext,
+) -> Result<(), CliError>
+where
+    O: Write,
+{
+    if is_help_request(args) {
+        write_command_help("init", stdout)?;
+        return Ok(());
+    }
+
+    let options = parse_init_args(args, context)?;
+    let command = current_executable_command();
+    let block = render_devenv_init_block(options.syntax, &options.shell_name, &command);
+
+    if !options.write {
+        writeln!(stdout, "DevEnv init {}", options.shell_name)?;
+        writeln!(stdout, "profile: {}", options.profile_path.display())?;
+        writeln!(stdout, "mode: preview")?;
+        write!(stdout, "{block}")?;
+        writeln!(
+            stdout,
+            "next: run `devenv init {} --write` to update profile.",
+            options.shell_name
+        )?;
+        return Ok(());
+    }
+
+    let status = write_devenv_init_block(&options.profile_path, &block)?;
+    let _ = run_shim_rehash(context)?;
+    writeln!(stdout, "initialized DevEnv {} profile", options.shell_name)?;
+    writeln!(stdout, "path: {}", options.profile_path.display())?;
+    writeln!(stdout, "block: {}", status.as_str())?;
+    writeln!(
+        stdout,
+        "next: run `{}` or open a new shell.",
+        profile_reload_command(options.syntax, &options.profile_path)
+    )?;
+    Ok(())
+}
+
+fn parse_init_args(args: &[String], context: &CommandContext) -> Result<InitOptions, CliError> {
+    let mut shell_name = None;
+    let mut profile_path = None;
+    let mut write = false;
+    let mut dry_run = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--write" => {
+                write = true;
+                index += 1;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
+            "--profile" => {
+                let Some(path) = args.get(index + 1) else {
+                    return Err(CliError::usage(
+                        "usage: devenv init [zsh|bash|fish|powershell] [--write] [--profile <path>]"
+                            .to_owned(),
+                    ));
+                };
+                profile_path = Some(resolve_input_path(path, &context.current_dir));
+                index += 2;
+            }
+            value if value.starts_with('-') => {
+                return Err(CliError::usage(format!(
+                    "unknown init option `{value}`\nusage: devenv init [zsh|bash|fish|powershell] [--write] [--profile <path>]"
+                )));
+            }
+            value => {
+                if shell_name.is_some() {
+                    return Err(CliError::usage(
+                        "usage: devenv init [zsh|bash|fish|powershell] [--write] [--profile <path>]"
+                            .to_owned(),
+                    ));
+                }
+                shell_name = Some(value.to_owned());
+                index += 1;
+            }
+        }
+    }
+
+    if dry_run && write {
+        return Err(CliError::usage(
+            "`--dry-run` cannot be combined with `--write`".to_owned(),
+        ));
+    }
+
+    let shell_name = shell_name.unwrap_or_else(|| detect_shell_name(context));
+    let syntax = parse_shell_syntax(&shell_name)?;
+    let profile_path = profile_path.unwrap_or(default_profile_path(syntax, context)?);
+
+    Ok(InitOptions {
+        shell_name,
+        syntax,
+        profile_path,
+        write,
+    })
+}
+
+fn detect_shell_name(context: &CommandContext) -> String {
+    context
+        .env_vars
+        .get("SHELL")
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| matches!(*name, "zsh" | "bash" | "fish"))
+        .unwrap_or("zsh")
+        .to_owned()
+}
+
+fn default_profile_path(
+    syntax: ShellSyntax,
+    context: &CommandContext,
+) -> Result<PathBuf, CliError> {
+    match syntax {
+        ShellSyntax::Bash => Ok(home_dir(context)?.join(".bashrc")),
+        ShellSyntax::Zsh => Ok(home_dir(context)?.join(".zshrc")),
+        ShellSyntax::Fish => Ok(context
+            .env_vars
+            .get("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(home_dir(context)?.join(".config"))
+            .join("fish/config.fish")),
+        ShellSyntax::PowerShell => Ok(context
+            .env_vars
+            .get("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(home_dir(context)?.join(".config"))
+            .join("powershell/Microsoft.PowerShell_profile.ps1")),
+        ShellSyntax::Posix => Ok(home_dir(context)?.join(".profile")),
+    }
+}
+
+fn home_dir(context: &CommandContext) -> Result<PathBuf, CliError> {
+    context
+        .env_vars
+        .get("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| CliError::runtime("cannot resolve shell profile path: set HOME".to_owned()))
+}
+
+fn render_devenv_init_block(syntax: ShellSyntax, shell_name: &str, command: &str) -> String {
+    format!(
+        "{DEVENV_INIT_BLOCK_BEGIN}\n# Managed by DevEnv. Run `devenv init {shell_name} --write` to update.\n{}\n{DEVENV_INIT_BLOCK_END}\n",
+        shell_profile_activation_line(syntax, shell_name, command)
+    )
+}
+
+fn shell_profile_activation_line(syntax: ShellSyntax, shell_name: &str, command: &str) -> String {
+    match syntax {
+        ShellSyntax::Bash | ShellSyntax::Zsh | ShellSyntax::Posix => {
+            format!("eval \"$({} activate {shell_name})\"", shell_quote(command))
+        }
+        ShellSyntax::Fish => format!("{} activate fish | source", shell_quote(command)),
+        ShellSyntax::PowerShell => {
+            format!(
+                "Invoke-Expression (& {} activate powershell | Out-String)",
+                powershell_quote(command)
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitBlockWriteStatus {
+    Added,
+    Updated,
+    Unchanged,
+}
+
+impl InitBlockWriteStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Updated => "updated",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
+fn write_devenv_init_block(
+    profile_path: &Path,
+    block: &str,
+) -> Result<InitBlockWriteStatus, CliError> {
+    if let Some(parent) = profile_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let existing = match std::fs::read_to_string(profile_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let (updated, status) = upsert_managed_block(&existing, block);
+    if status != InitBlockWriteStatus::Unchanged {
+        std::fs::write(profile_path, updated)?;
+    }
+    Ok(status)
+}
+
+fn upsert_managed_block(existing: &str, block: &str) -> (String, InitBlockWriteStatus) {
+    if let Some(start) = existing.find(DEVENV_INIT_BLOCK_BEGIN) {
+        if let Some(relative_end) = existing[start..].find(DEVENV_INIT_BLOCK_END) {
+            let end = start + relative_end + DEVENV_INIT_BLOCK_END.len();
+            let mut updated = String::new();
+            updated.push_str(&existing[..start]);
+            if !updated.is_empty() && !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(block);
+            let rest = existing[end..].trim_start_matches('\n');
+            if !rest.is_empty() {
+                if !updated.ends_with('\n') {
+                    updated.push('\n');
+                }
+                updated.push_str(rest);
+            }
+            let status = if updated == existing {
+                InitBlockWriteStatus::Unchanged
+            } else {
+                InitBlockWriteStatus::Updated
+            };
+            return (updated, status);
+        }
+    }
+
+    let mut updated = existing.to_owned();
+    if !updated.is_empty() {
+        if !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push('\n');
+    }
+    updated.push_str(block);
+    (updated, InitBlockWriteStatus::Added)
+}
+
+fn profile_reload_command(syntax: ShellSyntax, profile_path: &Path) -> String {
+    match syntax {
+        ShellSyntax::PowerShell => {
+            format!(". {}", powershell_quote(&profile_path.to_string_lossy()))
+        }
+        _ => format!("source {}", shell_quote(&profile_path.to_string_lossy())),
+    }
 }
 
 fn run_add_java<O>(path: &str, stdout: &mut O, context: &CommandContext) -> Result<(), CliError>

@@ -31,6 +31,7 @@ fn help_command_prints_top_level_usage() {
         .success()
         .stdout(predicate::str::contains("Usage: devenv <command> [args]"))
         .stdout(predicate::str::contains("Commands:"))
+        .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("uninstall"))
         .stdout(predicate::str::contains("Supported tools:"))
         .stderr(predicate::str::is_empty());
@@ -63,6 +64,75 @@ fn help_subcommand_prints_command_usage() {
             "Deletes only DevEnv-owned installs",
         ))
         .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .arg("help")
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage: devenv init"))
+        .stdout(predicate::str::contains("--write"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn init_bash_previews_managed_block_without_writing_profile() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let profile = temp.path().join(".bashrc");
+    fs::write(&profile, "keep\n").expect("profile should be written");
+
+    Command::cargo_bin("devenv")
+        .expect("devenv binary should build")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .env("DEVENV_HOME", temp.path().join("devenv-home"))
+        .arg("init")
+        .arg("bash")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DevEnv init bash"))
+        .stdout(predicate::str::contains("mode: preview"))
+        .stdout(predicate::str::contains("# >>> devenv init >>>"))
+        .stdout(predicate::str::contains("activate bash"))
+        .stdout(predicate::str::contains("devenv init bash --write"))
+        .stderr(predicate::str::is_empty());
+
+    assert_eq!(
+        fs::read_to_string(&profile).expect("profile should be readable"),
+        "keep\n"
+    );
+}
+
+#[test]
+fn init_bash_write_adds_managed_block_and_is_idempotent() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let profile = temp.path().join(".bashrc");
+    fs::write(&profile, "keep\n").expect("profile should be written");
+
+    for _ in 0..2 {
+        Command::cargo_bin("devenv")
+            .expect("devenv binary should build")
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("DEVENV_HOME", temp.path().join("devenv-home"))
+            .arg("init")
+            .arg("bash")
+            .arg("--write")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("initialized DevEnv bash profile"))
+            .stdout(predicate::str::contains(profile.to_string_lossy().as_ref()))
+            .stdout(predicate::str::contains("source"))
+            .stderr(predicate::str::is_empty());
+    }
+
+    let contents = fs::read_to_string(&profile).expect("profile should be readable");
+    assert!(contents.contains("keep\n"));
+    assert!(contents.contains("# >>> devenv init >>>"));
+    assert!(contents.contains("activate bash"));
+    assert_eq!(contents.matches("# >>> devenv init >>>").count(), 1);
+    assert_eq!(contents.matches("# <<< devenv init <<<").count(), 1);
 }
 
 #[test]

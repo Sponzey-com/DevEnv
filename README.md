@@ -120,15 +120,38 @@ For direct commands such as `java --version`, activate shims once in the current
 
 ```sh
 eval "$(devenv activate zsh)"
+eval "$(devenv activate bash)"
 java --version
 ```
+
+`devenv local` and `devenv global` write version selections. They do not directly mutate the parent shell process. Direct commands such as `go version` change only after the DevEnv shim directory is active at the front of `PATH`.
+
+This is the same model used by tools such as `goenv`, `jenv`, `pyenv`, and `rbenv`: `local` writes a project version file, and shell initialization makes shims read that file for each command.
 
 For new terminal sessions, add the exact activation line printed by `devenv local`, `devenv global`, or `devenv use` to your shell profile:
 
 ```sh
+devenv init bash --write
+devenv init zsh --write
+
+# Manual alternative:
 devenv global java 21
-# Then copy the printed "new sessions:" line into ~/.zshrc.
+# zsh:  copy the printed "new sessions:" line into ~/.zshrc.
+# bash: copy the printed "new sessions:" line into ~/.bashrc.
 ```
+
+Ubuntu/bash example:
+
+```sh
+devenv init bash --write
+source ~/.bashrc
+hash -r
+type -a go
+```
+
+`devenv init <shell>` previews the managed shell profile block without editing files. Add `--write` to update the profile. Existing DevEnv init blocks are replaced idempotently.
+
+The first `go` entry should point to the DevEnv shim directory, usually `~/.local/share/devenv/shims/go` on Linux. If a system Go path still appears first, move the DevEnv activation line below any existing Go `PATH` setup in `~/.bashrc`.
 
 This matters for npm installs because the npm entrypoint is a Node.js wrapper. The generated line uses the native DevEnv binary path so DevEnv shims can safely manage `node`, `npm`, and other commands.
 
