@@ -1,6 +1,6 @@
 # DevEnv User Guide
 
-This guide covers the Java, Go, Node.js, Python, Ruby, PHP, Rust, Flutter/Dart, Terraform, and OpenTofu MVP workflows.
+This guide covers the Java, Go, Node.js, Python, Ruby, PHP, Rust, and Flutter MVP workflows. Dart is available only through the Dart SDK bundled inside a selected Flutter SDK.
 
 ## Concepts
 
@@ -20,7 +20,7 @@ The active version is resolved from highest to lowest precedence:
 
 ## Add Existing Runtimes
 
-Register a JDK, Go SDK, Node.js runtime, Python runtime, Ruby runtime, PHP runtime, Rust toolchain, Flutter SDK, or single-binary IaC tool already installed on the machine:
+Register a JDK, Go SDK, Node.js runtime, Python runtime, Ruby runtime, PHP runtime, Rust toolchain, or Flutter SDK already installed on the machine:
 
 ```sh
 devenv add java /Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
@@ -31,8 +31,6 @@ devenv add ruby ~/.rbenv/versions/3.3.0
 devenv add php ~/.phpenv/versions/8.3.7
 devenv add rust ~/.rustup/toolchains/1.85.0-aarch64-apple-darwin
 devenv add flutter ~/sdks/flutter
-devenv add terraform /opt/terraform-1.8.5/terraform
-devenv add opentofu /opt/opentofu-1.8.5/tofu
 ```
 
 List registered, discovered, and DevEnv-installed runtimes:
@@ -46,8 +44,6 @@ devenv list ruby
 devenv list php
 devenv list rust
 devenv list flutter
-devenv list terraform
-devenv list opentofu
 ```
 
 Remove an external runtime registration without deleting the runtime directory:
@@ -61,8 +57,6 @@ devenv remove ruby ~/.rbenv/versions/3.3.0
 devenv remove php ~/.phpenv/versions/8.3.7
 devenv remove rust ~/.rustup/toolchains/1.85.0-aarch64-apple-darwin
 devenv remove flutter ~/sdks/flutter
-devenv remove terraform /opt/terraform-1.8.5/terraform
-devenv remove opentofu /opt/opentofu-1.8.5/tofu
 ```
 
 `remove` is intentionally limited to external registrations. It does not delete runtime files.
@@ -80,8 +74,6 @@ devenv local ruby 3.3
 devenv local php 8.3
 devenv local rust 1.85
 devenv local flutter 3.24
-devenv local terraform 1.8
-devenv local opentofu 1.8
 ```
 
 Global selection writes the file pointed to by `DEVENV_GLOBAL_CONFIG`, or the default DevEnv global config when that variable is not set:
@@ -111,8 +103,6 @@ devenv current ruby
 devenv current php
 devenv current rust
 devenv current flutter
-devenv current terraform
-devenv current opentofu
 ```
 
 Project config compatibility files are read in this order when present:
@@ -144,11 +134,9 @@ devenv exec -- ruby --version
 devenv exec -- php --version
 devenv exec -- rustc --version
 devenv exec -- flutter --version
-devenv exec -- terraform version
-devenv exec -- tofu version
 ```
 
-`devenv exec` sets tool-specific environment such as `JAVA_HOME`, `GOROOT`, and `FLUTTER_ROOT`, then prepends the selected runtime directories to `PATH`. Node.js, Python, Ruby, PHP, and Rust activation only prepend the runtime `bin` directory. Terraform and OpenTofu prepend the directory that contains the selected single binary.
+`devenv exec` sets tool-specific environment such as `JAVA_HOME`, `GOROOT`, and `FLUTTER_ROOT`, then prepends the selected runtime directories to `PATH`. Node.js, Python, Ruby, PHP, and Rust activation only prepend the runtime `bin` directory.
 
 ## Ruby And PHP
 
@@ -188,18 +176,9 @@ DevEnv does not generate Flutter projects, install Android Studio, install Xcode
 
 ## Terraform And OpenTofu
 
-Terraform and OpenTofu validate the single-binary adapter shape. The tool names are `terraform` and `opentofu`; OpenTofu exposes the `tofu` binary.
+Terraform and OpenTofu are not documented as supported yet. Internal adapter and catalog shape work exists, but it remains experimental and should not be treated as a supported MVP workflow.
 
-DevEnv accepts either a direct binary path or a directory containing the binary:
-
-```sh
-devenv add terraform /usr/local/bin/terraform
-devenv add opentofu /usr/local/bin/tofu
-```
-
-For external registration, version metadata should be available through `VERSION`, `.devenv-version`, `bin/VERSION`, or a versioned runtime directory name. DevEnv-owned installs use the selected install version and the generic plain-file extraction path.
-
-Future IaC tools such as Terragrunt, Terramate, and Atmos are intentionally deferred until the Terraform/OpenTofu single-binary shape is stable.
+Use an existing Terraform/OpenTofu installation or a dedicated version manager for now. Future IaC tools such as Terraform, OpenTofu, Terragrunt, Terramate, and Atmos are deferred until the single-binary tool model is ready to be documented and supported.
 
 ## Rust And Rustup
 
@@ -224,9 +203,10 @@ DevEnv uses provider capabilities to describe what each tool can do.
 | Go | official | Direct | Official metadata/cache path is supported. | Use `devenv list-remote go --refresh` or fixture metadata. |
 | Java | temurin | Direct | Temurin metadata is supported. | Use `--distribution temurin`. |
 | Node.js | official | Direct | Official index/checksum metadata is supported. | Use `devenv list-remote node --refresh`. |
-| Flutter/Dart | stable | Direct | Stable channel metadata is supported. | Use `--channel stable`; beta/dev are deferred. |
-| Terraform | hashicorp | Direct | Official release/checksum metadata is supported. | Use `devenv list-remote terraform --refresh`. |
-| OpenTofu | opentofu | Direct | Official release/checksum metadata is supported. | Use `devenv list-remote opentofu --refresh`. |
+| Flutter | stable | Direct | Stable channel metadata is supported and exposes bundled `dart`. | Use `--channel stable`; beta/dev are deferred. |
+| Dart | Bundle via Flutter | Bundled | No standalone Dart SDK provider yet. | Select Flutter when bundled Dart is acceptable. |
+| Terraform | planned | Planned | Not documented as supported yet; internal single-binary work is experimental. | Use an existing installation or another manager for now. |
+| OpenTofu | planned | Planned | Not documented as supported yet; internal single-binary work is experimental. | Use an existing installation or another manager for now. |
 | Python | cpython | Direct, fixture-backed | Live CPython direct install is deferred. | Use `DEVENV_PYTHON_RELEASE_METADATA` for fixtures or `devenv add python <path>`; see `docs/adr/0008-python-install-strategy.md`. |
 | Rust | rustup | Delegated | DevEnv does not install Rust toolchains. | Use rustup, then let DevEnv discover `RUSTUP_HOME` or run `devenv add rust <path>`. |
 | Ruby | local | LocalOnly | Remote install is deferred. | Register an existing runtime with `devenv add ruby <path>`. |
@@ -264,8 +244,6 @@ export DEVENV_GO_RELEASE_METADATA=/path/to/go-releases.toml
 export DEVENV_NODE_RELEASE_METADATA=/path/to/node-releases.toml
 export DEVENV_PYTHON_RELEASE_METADATA=/path/to/python-releases.toml
 export DEVENV_FLUTTER_RELEASE_METADATA=/path/to/flutter-releases.toml
-export DEVENV_TERRAFORM_RELEASE_METADATA=/path/to/terraform-releases.toml
-export DEVENV_OPENTOFU_RELEASE_METADATA=/path/to/opentofu-releases.toml
 ```
 
 Some providers also accept official-style fixtures or mirror base URLs. These inputs use the provider parser and write the same metadata cache format:
@@ -277,12 +255,6 @@ export DEVENV_NODE_OFFICIAL_SHASUMS_DIR=/path/to/node-shasums
 export DEVENV_NODE_OFFICIAL_BASE_URL=https://mirror.example.com/nodejs
 export DEVENV_FLUTTER_OFFICIAL_RELEASES_DIR=/path/to/flutter-release-jsons
 export DEVENV_FLUTTER_OFFICIAL_BASE_URL=https://mirror.example.com/flutter
-export DEVENV_TERRAFORM_OFFICIAL_RELEASE_INDEX=/path/to/terraform-releases.json
-export DEVENV_TERRAFORM_OFFICIAL_SHA256SUMS_DIR=/path/to/terraform-shasums
-export DEVENV_TERRAFORM_OFFICIAL_BASE_URL=https://mirror.example.com/terraform
-export DEVENV_OPENTOFU_OFFICIAL_RELEASES=/path/to/opentofu-releases.json
-export DEVENV_OPENTOFU_OFFICIAL_SHA256SUMS_DIR=/path/to/opentofu-shasums
-export DEVENV_OPENTOFU_OFFICIAL_BASE_URL=https://mirror.example.com/opentofu
 ```
 
 Java Temurin currently supports normalized Java fixture metadata and Temurin API JSON fixtures through `DEVENV_JAVA_TEMURIN_RELEASE_METADATA`. Live Temurin HTTP refresh is deferred.
@@ -350,8 +322,6 @@ devenv list-remote go --offline
 devenv list-remote node
 devenv list-remote python
 devenv list-remote flutter --channel stable
-devenv list-remote terraform
-devenv list-remote opentofu
 ```
 
 Inspect provider capability and metadata cache state:
@@ -386,7 +356,7 @@ Recommended mirror paths:
 - verified DevEnv catalog release archives extracted to an internal file or HTTP mirror;
 - normalized fixture files for simple internal catalogs;
 - official-style fixture directories for parser-compatible mirrors;
-- provider base URLs such as `DEVENV_NODE_OFFICIAL_BASE_URL`, `DEVENV_FLUTTER_OFFICIAL_BASE_URL`, `DEVENV_TERRAFORM_OFFICIAL_BASE_URL`, or `DEVENV_OPENTOFU_OFFICIAL_BASE_URL`.
+- provider base URLs such as `DEVENV_NODE_OFFICIAL_BASE_URL` or `DEVENV_FLUTTER_OFFICIAL_BASE_URL`.
 
 For catalog-based air-gapped use, verify the catalog archive on an online machine, copy the extracted `v1/` directory to the internal mirror, then update metadata from a file URL:
 
@@ -427,8 +397,6 @@ devenv install go 1.22.5
 devenv install node 20
 devenv install python 3.12
 devenv install flutter 3.24
-devenv install terraform 1.8
-devenv install opentofu 1.8
 ```
 
 Delete a DevEnv-owned runtime from storage:
@@ -439,8 +407,6 @@ devenv uninstall go 1.22
 devenv uninstall node 20
 devenv uninstall python 3.12
 devenv uninstall flutter 3.24
-devenv uninstall terraform 1.8
-devenv uninstall opentofu 1.8
 ```
 
 `uninstall` only removes DevEnv-owned installs for the current platform. It does not remove runtimes registered with `devenv add`; use `devenv remove <tool> <path>` for those.
@@ -509,9 +475,7 @@ Generated shims currently include:
 
 - Java: `java`, `javac`, `jar`, `javadoc`
 - Go: `go`, `gofmt`
-- Flutter/Dart: `flutter`, `dart`
-- Terraform: `terraform`
-- OpenTofu: `tofu`
+- Flutter: `flutter`, `dart`
 - Node.js: `node`, `npm`, `npx`, `corepack`
 - Python: `python`, `python3`, `pip`
 - Ruby: `ruby`, `gem`, `bundle`

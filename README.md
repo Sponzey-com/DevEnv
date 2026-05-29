@@ -1,6 +1,6 @@
 # DevEnv
 
-[Korean](README.md.ko)
+[Korean](README.ko.md)
 
 DevEnv is a Rust-based CLI for selecting, installing, and activating development runtimes and command-line tools per project.
 
@@ -33,18 +33,19 @@ Supported workflows:
 
 Provider status:
 
-| Tool         | Provider       | Current support                                                              |
-| ------------ | -------------- | ---------------------------------------------------------------------------- |
-| Java         | Temurin        | Direct install metadata and local registration                               |
-| Go           | Official       | Direct install metadata, catalog metadata, local registration                |
-| Node.js      | Official       | Direct install metadata, catalog metadata, local registration                |
-| Python       | CPython        | Fixture-backed direct path and local registration; live provider is deferred |
-| Ruby         | Local          | Local registration only                                                      |
-| PHP          | Local          | Local registration only                                                      |
-| Rust         | rustup         | Delegated to rustup; DevEnv discovers/registers toolchains                   |
-| Flutter/Dart | Stable channel | Direct install metadata and local registration                               |
-| Terraform    | HashiCorp      | Direct install metadata, catalog path, single-binary install                 |
-| OpenTofu     | OpenTofu       | Direct install metadata, single-binary install                               |
+| Tool      | Provider           | Current support                                                              |
+| --------- | ------------------ | ---------------------------------------------------------------------------- |
+| Java      | Temurin            | Direct install metadata and local registration                               |
+| Go        | Official           | Direct install metadata, catalog metadata, local registration                |
+| Node.js   | Official           | Direct install metadata, catalog metadata, local registration                |
+| Python    | CPython            | Fixture-backed direct path and local registration; live provider is deferred |
+| Ruby      | Local              | Local registration only                                                      |
+| PHP       | Local              | Local registration only                                                      |
+| Rust      | rustup             | Delegated to rustup; DevEnv discovers/registers toolchains                   |
+| Flutter   | Stable channel     | Direct install metadata and local registration; exposes bundled `dart`       |
+| Dart      | Bundle via Flutter | No standalone Dart SDK provider yet; use Flutter's bundled Dart SDK          |
+| Terraform | Planned            | Not documented as supported yet; internal single-binary work is experimental |
+| OpenTofu  | Planned            | Not documented as supported yet; internal single-binary work is experimental |
 
 DevEnv reads common project version files where implemented:
 
@@ -182,7 +183,7 @@ Current catalog support includes:
 - manifest and payload checksum verification;
 - Go catalog metadata path;
 - Node catalog metadata path;
-- Terraform/OpenTofu catalog shape validation;
+- experimental Terraform/OpenTofu catalog shape validation only;
 - opt-in catalog smoke script.
 
 Catalog usage is opt-in:
