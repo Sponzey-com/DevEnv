@@ -381,7 +381,10 @@ impl NodeOfficialReleaseMetadata {
                     shasums_by_version,
                 )
             })
-            .collect::<CoreResult<Vec<_>>>()?;
+            .collect::<CoreResult<Vec<_>>>()?
+            .into_iter()
+            .filter(|release| !release.artifacts().is_empty())
+            .collect::<Vec<_>>();
 
         Ok(Self {
             index: RemoteReleaseIndex::new(tool, provider, releases),
@@ -544,7 +547,7 @@ impl VersionSource for NodeReleaseVersionSource {
             .metadata
             .releases()
             .iter()
-            .filter(|release| release.stable())
+            .filter(|release| release.stable() && node_release_has_installable_archive(release))
             .map(|release| release.version().clone())
             .collect::<Vec<_>>();
         versions.sort_by(compare_node_version_desc);
@@ -552,6 +555,10 @@ impl VersionSource for NodeReleaseVersionSource {
 
         Ok(versions)
     }
+}
+
+fn node_release_has_installable_archive(release: &NodeRelease) -> bool {
+    release.files().iter().any(|file| file.kind() == "archive")
 }
 
 #[derive(Debug, Clone)]
@@ -969,18 +976,16 @@ fn node_remote_release_from_official_entry(
 ) -> CoreResult<RemoteRelease> {
     let normalized = normalize_node_version(&release.version)?;
     let version = Version::new(&normalized)?;
-    let checksums = shasums_by_version.get(&normalized).ok_or_else(|| {
-        CoreError::message(format!(
-            "invalid Node.js official metadata: missing SHASUMS256 payload for {}",
-            release.version
-        ))
-    })?;
-    let checksums = parse_node_shasums256(checksums)?;
+    let checksums = shasums_by_version
+        .get(&normalized)
+        .map(|input| parse_node_shasums256(input))
+        .transpose()?
+        .unwrap_or_default();
     let artifacts = release
         .files
         .iter()
         .filter_map(|file| node_archive_file_from_official_token(&release.version, file))
-        .map(|archive| {
+        .filter_map(|archive| {
             node_remote_artifact_from_official_archive(
                 tool, provider, &version, archive, &checksums,
             )
@@ -1083,37 +1088,34 @@ fn node_remote_artifact_from_official_archive(
     release_version: &Version,
     archive: NodeOfficialArchive,
     checksums: &BTreeMap<String, String>,
-) -> CoreResult<ResolvedArtifact> {
-    let checksum = checksums.get(&archive.filename).ok_or_else(|| {
-        CoreError::message(format!(
-            "invalid Node.js official metadata: archive `{}` is missing SHASUMS256 checksum",
-            archive.filename
-        ))
-    })?;
-    let archive_type = archive_type_for_node_file(&archive.filename)?;
-    let artifact = Artifact::new(
-        format!(
-            "{}/v{}/{}",
-            NODE_OFFICIAL_DIST_BASE_URL,
-            release_version.raw(),
-            archive.filename
-        ),
-        archive.filename.clone(),
-        archive_type,
-        Some(checksum.clone()),
-    );
+) -> Option<CoreResult<ResolvedArtifact>> {
+    let checksum = checksums.get(&archive.filename)?.clone();
+    Some((|| {
+        let archive_type = archive_type_for_node_file(&archive.filename)?;
+        let artifact = Artifact::new(
+            format!(
+                "{}/v{}/{}",
+                NODE_OFFICIAL_DIST_BASE_URL,
+                release_version.raw(),
+                archive.filename
+            ),
+            archive.filename.clone(),
+            archive_type,
+            Some(checksum),
+        );
 
-    Ok(ResolvedArtifact::new(
-        tool.clone(),
-        provider.clone(),
-        release_version.clone(),
-        archive.platform,
-        artifact,
-    )
-    .with_metadata_field("filename", archive.filename)
-    .with_metadata_field("kind", "archive")
-    .with_metadata_field("node_os", archive.os)
-    .with_metadata_field("node_arch", archive.arch))
+        Ok(ResolvedArtifact::new(
+            tool.clone(),
+            provider.clone(),
+            release_version.clone(),
+            archive.platform,
+            artifact,
+        )
+        .with_metadata_field("filename", archive.filename)
+        .with_metadata_field("kind", "archive")
+        .with_metadata_field("node_os", archive.os)
+        .with_metadata_field("node_arch", archive.arch))
+    })())
 }
 
 fn node_remote_artifact_from_catalog_payload(

@@ -122,7 +122,7 @@ fn official_node_resolve_windows_x64_artifact() {
 }
 
 #[test]
-fn official_node_missing_shasums_checksum_is_rejected() {
+fn official_node_missing_shasums_checksum_skips_that_archive() {
     let mut shasums = official_shasums_by_version();
     shasums.insert(
         "20.11.1".to_owned(),
@@ -130,10 +130,50 @@ fn official_node_missing_shasums_checksum_is_rejected() {
             .to_owned(),
     );
 
-    let error = NodeOfficialReleaseMetadata::parse(official_index_fixture(), &shasums)
-        .expect_err("missing archive checksum should fail");
+    let metadata = NodeOfficialReleaseMetadata::parse(official_index_fixture(), &shasums)
+        .expect("missing archive checksum should skip only that archive")
+        .into_release_metadata()
+        .expect("release metadata should convert");
+    let resolver = NodeArtifactResolver::new(metadata);
+    let artifact = resolver
+        .resolve_artifact(
+            &ToolName::new("node").expect("tool should be valid"),
+            &Version::new("20.11.1").expect("version should be valid"),
+            Platform::new(OperatingSystem::Macos, Architecture::Arm64),
+        )
+        .expect("checksummed archive should still resolve");
+    let error = resolver
+        .resolve_artifact(
+            &ToolName::new("node").expect("tool should be valid"),
+            &Version::new("20.11.1").expect("version should be valid"),
+            Platform::new(OperatingSystem::Linux, Architecture::X64),
+        )
+        .expect_err("checksumless archive should not be installable");
 
-    assert!(error.to_string().contains("missing SHASUMS256 checksum"));
+    assert_eq!(artifact.filename(), "node-v20.11.1-darwin-arm64.tar.gz");
+    assert!(error.to_string().contains("does not provide an archive"));
+}
+
+#[test]
+fn official_node_release_without_checksummed_archives_is_not_listed() {
+    let mut shasums = official_shasums_by_version();
+    shasums.insert("21.2.0".to_owned(), String::new());
+    let tool = ToolName::new("node").expect("tool should be valid");
+    let source = NodeReleaseVersionSource::new(
+        NodeOfficialReleaseMetadata::parse(official_index_fixture(), &shasums)
+            .expect("official metadata should parse")
+            .into_release_metadata()
+            .expect("release metadata should convert"),
+    );
+
+    let versions = source
+        .list_versions(&tool)
+        .expect("versions should list")
+        .into_iter()
+        .map(|version| version.raw().to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(versions, vec!["20.11.1"]);
 }
 
 #[test]

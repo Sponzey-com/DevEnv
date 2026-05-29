@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -193,7 +193,7 @@ where
             Ok(0)
         }
         Some("list-remote") => {
-            run_list_remote_command(&args[1..], stdout, context)?;
+            run_list_remote_command(&args[1..], stdout, stderr, context)?;
             Ok(0)
         }
         Some("metadata") => {
@@ -1205,13 +1205,15 @@ where
     }
 }
 
-fn run_list_remote_command<O>(
+fn run_list_remote_command<O, E>(
     args: &[String],
     stdout: &mut O,
+    stderr: &mut E,
     context: &CommandContext,
 ) -> Result<(), CliError>
 where
     O: Write,
+    E: Write,
 {
     if is_help_request(args) {
         write_command_help("list-remote", stdout)?;
@@ -1268,8 +1270,12 @@ where
         "node" => {
             reject_java_distribution_option_for_tool(&tool, options.distribution.as_deref())?;
             reject_flutter_channel_option_for_tool(&tool, options.channel.as_deref())?;
+            let mut progress =
+                TerminalMetadataRefreshProgress::new(stderr, context.stderr_is_terminal);
             let source = NodeReleaseVersionSource::new(load_node_release_metadata_with_options(
-                context, options,
+                context,
+                options,
+                &mut progress,
             )?);
             write_remote_versions(&tool, &source, None, stdout)
         }
@@ -1404,6 +1410,90 @@ fn parse_list_remote_args(args: &[String]) -> Result<(&str, ListRemoteOptions), 
     };
 
     Ok((tool, options))
+}
+
+trait MetadataRefreshProgress {
+    fn message(&mut self, message: &str);
+    fn step(&mut self, current: usize, total: usize, message: &str);
+    fn finish(&mut self);
+}
+
+struct NoMetadataRefreshProgress;
+
+impl MetadataRefreshProgress for NoMetadataRefreshProgress {
+    fn message(&mut self, _message: &str) {}
+
+    fn step(&mut self, _current: usize, _total: usize, _message: &str) {}
+
+    fn finish(&mut self) {}
+}
+
+struct TerminalMetadataRefreshProgress<'a, W: Write> {
+    writer: &'a mut W,
+    enabled: bool,
+    frame_index: usize,
+    last_line_len: usize,
+    finished: bool,
+}
+
+impl<'a, W: Write> TerminalMetadataRefreshProgress<'a, W> {
+    fn new(writer: &'a mut W, enabled: bool) -> Self {
+        Self {
+            writer,
+            enabled,
+            frame_index: 0,
+            last_line_len: 0,
+            finished: false,
+        }
+    }
+
+    fn render(&mut self, message: &str) {
+        if !self.enabled {
+            return;
+        }
+
+        const FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
+        let frame = FRAMES[self.frame_index % FRAMES.len()];
+        self.frame_index += 1;
+        let line = format!("{frame} {message}");
+        let padding_len = self.last_line_len.saturating_sub(line.len());
+        self.last_line_len = self.last_line_len.max(line.len());
+        let _ = write!(self.writer, "\r{line}{}", " ".repeat(padding_len));
+        let _ = self.writer.flush();
+    }
+
+    fn clear_line(&mut self) {
+        if !self.enabled || self.last_line_len == 0 {
+            return;
+        }
+
+        let _ = write!(self.writer, "\r{}\r", " ".repeat(self.last_line_len));
+        let _ = self.writer.flush();
+        self.last_line_len = 0;
+    }
+}
+
+impl<W: Write> MetadataRefreshProgress for TerminalMetadataRefreshProgress<'_, W> {
+    fn message(&mut self, message: &str) {
+        self.render(message);
+    }
+
+    fn step(&mut self, current: usize, total: usize, message: &str) {
+        self.render(&format!("{message} {current}/{total}"));
+    }
+
+    fn finish(&mut self) {
+        self.clear_line();
+        self.finished = true;
+    }
+}
+
+impl<W: Write> Drop for TerminalMetadataRefreshProgress<'_, W> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.clear_line();
+        }
+    }
 }
 
 fn reject_java_distribution_option_for_tool(
@@ -2986,7 +3076,8 @@ fn update_node_metadata_provider(
                 || context.env_vars.contains_key(NODE_OFFICIAL_BASE_URL_ENV)
                 || allow_live_fetch
             {
-                refresh_node_official_metadata(cache, clock, context)?;
+                let mut progress = NoMetadataRefreshProgress;
+                refresh_node_official_metadata(cache, clock, context, &mut progress)?;
                 Ok(MetadataUpdateOutcome::Updated)
             } else {
                 Ok(MetadataUpdateOutcome::Skipped(format!(
@@ -3006,7 +3097,8 @@ fn update_node_metadata_provider(
                 || context.env_vars.contains_key(NODE_OFFICIAL_BASE_URL_ENV)
                 || allow_live_fetch
             {
-                refresh_node_official_metadata(cache, clock, context)?;
+                let mut progress = NoMetadataRefreshProgress;
+                refresh_node_official_metadata(cache, clock, context, &mut progress)?;
                 return Ok(MetadataUpdateOutcome::Updated);
             }
             Ok(MetadataUpdateOutcome::Skipped(format!(
@@ -7850,6 +7942,7 @@ fn java_temurin_metadata_cache_key() -> MetadataCacheKey {
 fn load_node_release_metadata_with_options(
     context: &CommandContext,
     options: ListRemoteOptions,
+    progress: &mut dyn MetadataRefreshProgress,
 ) -> Result<NodeReleaseMetadata, CliError> {
     if context.env_vars.contains_key(NODE_RELEASE_METADATA_ENV) {
         return load_release_metadata(
@@ -7882,7 +7975,7 @@ fn load_node_release_metadata_with_options(
         || context.env_vars.contains_key(NODE_OFFICIAL_BASE_URL_ENV)
     {
         let clock = SystemClock;
-        let loaded = refresh_node_official_metadata(&mut cache, &clock, context)?;
+        let loaded = refresh_node_official_metadata(&mut cache, &clock, context, progress)?;
         return parse_node_official_metadata_bundle(&loaded.contents);
     }
 
@@ -7998,11 +8091,12 @@ fn refresh_node_official_metadata(
     cache: &mut FileMetadataCache,
     clock: &dyn Clock,
     context: &CommandContext,
+    progress: &mut dyn MetadataRefreshProgress,
 ) -> Result<LoadedReleaseMetadata, CliError> {
     let loaded = if let Some(path) = context.env_vars.get(NODE_OFFICIAL_RELEASE_INDEX_ENV) {
         refresh_node_official_metadata_from_fixture(context, path)?
     } else {
-        refresh_node_official_metadata_from_http(context)?
+        refresh_node_official_metadata_from_http(context, progress)?
     };
     parse_node_official_metadata_bundle(&loaded.contents)?;
     write_node_official_metadata_cache_entry(cache, clock, &loaded)?;
@@ -8031,6 +8125,7 @@ fn refresh_node_official_metadata_from_fixture(
 
 fn refresh_node_official_metadata_from_http(
     context: &CommandContext,
+    progress: &mut dyn MetadataRefreshProgress,
 ) -> Result<LoadedReleaseMetadata, CliError> {
     let base_url = context
         .env_vars
@@ -8043,16 +8138,25 @@ fn refresh_node_official_metadata_from_http(
         NODE_OFFICIAL_INDEX_URL.to_owned()
     };
     let mut client = ReqwestMetadataHttpClient::new()?;
+    progress.message("refreshing Node.js official metadata index");
     let index = fetch_node_official_payload(&index_url, &mut client)?;
     let versions = node_official_required_shasums_versions(&index)?;
+    let version_count = versions.len();
     let mut shasums = BTreeMap::new();
-    for version in versions {
+    for (index, version) in versions.into_iter().enumerate() {
+        progress.step(
+            index + 1,
+            version_count,
+            &format!("fetching Node.js SHASUMS256 for v{version}"),
+        );
         let shasums_url = format!("{base_url}/v{version}/SHASUMS256.txt");
         let payload = fetch_node_official_payload(&shasums_url, &mut client)?;
         parse_node_shasums256(&payload).map_err(CliError::from)?;
         shasums.insert(version, payload);
     }
+    progress.message("writing Node.js official metadata cache");
     let contents = encode_node_official_metadata_bundle(&index, &shasums)?;
+    progress.finish();
 
     Ok(LoadedReleaseMetadata {
         contents,
@@ -9081,6 +9185,7 @@ struct CommandContext {
     current_dir: PathBuf,
     global_config_path: Option<PathBuf>,
     env_vars: std::collections::BTreeMap<String, String>,
+    stderr_is_terminal: bool,
 }
 
 impl CommandContext {
@@ -9089,6 +9194,7 @@ impl CommandContext {
             current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             global_config_path: std::env::var_os(GLOBAL_CONFIG_ENV).map(PathBuf::from),
             env_vars: std::env::vars().collect(),
+            stderr_is_terminal: io::stderr().is_terminal(),
         }
     }
 }
@@ -9156,6 +9262,7 @@ mod tests {
             current_dir: PathBuf::from("."),
             global_config_path: None,
             env_vars,
+            stderr_is_terminal: false,
         }
     }
 
@@ -9163,6 +9270,22 @@ mod tests {
         CatalogTrustFailure::SignatureMismatch {
             reason: "test signature mismatch".to_owned(),
         }
+    }
+
+    #[test]
+    fn terminal_metadata_refresh_progress_renders_spinner_frames() {
+        let mut output = Vec::new();
+        {
+            let mut progress = TerminalMetadataRefreshProgress::new(&mut output, true);
+            progress.message("refreshing Node.js official metadata index");
+            progress.step(2, 10, "fetching Node.js SHASUMS256 for v20.11.1");
+            progress.finish();
+        }
+
+        let output = String::from_utf8(output).expect("progress should be UTF-8");
+        assert!(output.contains("- refreshing Node.js official metadata index"));
+        assert!(output.contains("\\ fetching Node.js SHASUMS256 for v20.11.1 2/10"));
+        assert!(output.ends_with('\r'));
     }
 
     #[test]
